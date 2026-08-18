@@ -1,0 +1,31 @@
+// §11.3 layer 2 — tailnet ACL restricting who may reach Mission Control.
+//
+// This is a SNIPPET to merge into the tailnet policy file (admin console →
+// Access Controls), not a complete policy. Adjust names to the real tailnet.
+//
+// Intent: only the operator's own (user-owned, untagged) devices may reach
+// port 443 on the VPS. Tagged/shared nodes stay out, so even a compromised
+// tagged device cannot reach the dashboard origin — and identity headers
+// are never populated for tagged devices anyway (§11.2).
+//
+// The API itself (127.0.0.1:8100) is not addressable from the tailnet at
+// all; 443 is tailscale serve. Agents on the VPS talk to the API over
+// loopback with service tokens (Phase 2) and never through Serve.
+{
+	"acls": [
+		// Operator devices → Mission Control dashboard (tailscale serve TLS).
+		{
+			"action": "accept",
+			"src":    ["castillop92@gmail.com"],
+			"dst":    ["mission-control-vps:443"],
+		},
+		// ...merge with existing rules. If the tailnet still uses the default
+		// allow-all rule ({"action":"accept","src":["*"],"dst":["*:*"]}),
+		// replace it — layer 2 does not exist until the default rule is gone.
+	],
+
+	"hosts": {
+		// Set to the VPS's stable tailnet IP (tailscale ip -4).
+		"mission-control-vps": "100.64.0.0",
+	},
+}

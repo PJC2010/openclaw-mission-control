@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Secrets — never in version control (S5)
+.env
+*.env
+!.env.example
+
+# Local data
+pgdata/
+*.sqlite3
+*.log
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Frontend (Phase 5)
+node_modules/
+.next/
+out/

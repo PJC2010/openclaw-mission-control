@@ -1,0 +1,22 @@
+# Mission Control — PostgreSQL (Docker Compose wrapper).
+# Install: copy to /etc/systemd/system/, then `systemctl enable --now mission-control-db`.
+# Assumes the repo is deployed at /opt/mission-control with its env file at
+# /etc/mission-control/env (see docs/phase-0-runbook.md).
+
+[Unit]
+Description=Mission Control PostgreSQL (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/mission-control
+# --wait blocks until the container healthcheck passes, so units ordered
+# After= this one see a ready database.
+ExecStart=/usr/bin/docker compose --env-file /etc/mission-control/env up -d --wait postgres
+ExecStop=/usr/bin/docker compose --env-file /etc/mission-control/env stop postgres
+
+[Install]
+WantedBy=multi-user.target

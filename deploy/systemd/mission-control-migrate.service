@@ -1,0 +1,27 @@
+# Mission Control — Alembic migrations, run as a oneshot before the API.
+# Uses the mc_migrate role (MC_MIGRATE_DATABASE_URL) — the only role with DDL
+# rights (§12 S4). The API unit Requires= this unit, so a failed migration
+# keeps the API down rather than serving against a wrong schema.
+
+[Unit]
+Description=Mission Control database migrations (alembic upgrade head)
+Requires=mission-control-db.service
+After=mission-control-db.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=missionctl
+Group=missionctl
+EnvironmentFile=/etc/mission-control/env
+WorkingDirectory=/opt/mission-control/api
+ExecStart=/opt/mission-control/api/.venv/bin/alembic upgrade head
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/opt/mission-control
+
+[Install]
+WantedBy=multi-user.target

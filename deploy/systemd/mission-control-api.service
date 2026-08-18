@@ -1,0 +1,42 @@
+# Mission Control — API server. Binds 127.0.0.1 only (C2); fronted by
+# `tailscale serve` for tailnet access (C1). The service user needs
+# tailscaled socket access for whois verification:
+#   sudo tailscale set --operator=missionctl
+
+[Unit]
+Description=Mission Control API (loopback-only FastAPI)
+Requires=mission-control-migrate.service
+After=network-online.target tailscaled.service mission-control-migrate.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=exec
+User=missionctl
+Group=missionctl
+EnvironmentFile=/etc/mission-control/env
+WorkingDirectory=/opt/mission-control/api
+ExecStart=/opt/mission-control/api/.venv/bin/python -m mission_control
+Restart=on-failure
+RestartSec=2
+
+# Hardening. Loosen deliberately, not by default:
+#  - AF_UNIX is required for the tailscale CLI's local-daemon socket.
+#  - IPAddressAllow=localhost matches Phase 0's egress needs (DB + loopback);
+#    Phase 5 (web push) will need outbound internet from this unit.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressAllow=localhost
+IPAddressDeny=any
+ReadOnlyPaths=/opt/mission-control
+
+[Install]
+WantedBy=multi-user.target
