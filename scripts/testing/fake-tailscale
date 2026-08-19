@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Stand-in for the tailscale CLI so the smoke test exercises the REAL
+whois resolver (subprocess exec, JSON parse, tagged-node rejection)
+without needing a tailnet. Only the daemon is faked, never our code."""
+import json, sys
+if len(sys.argv) >= 4 and sys.argv[1] == "whois" and sys.argv[2] == "--json":
+    ip = sys.argv[3]
+    if ip == "100.101.102.103":
+        print(json.dumps({
+            "Node": {"ID": 1, "Name": "phone.tail1234.ts.net.", "Tags": None},
+            "UserProfile": {"ID": 7, "LoginName": "castillop92@gmail.com",
+                            "DisplayName": "Pete Castillo"},
+        }))
+        sys.exit(0)
+    print(f"no match for {ip}", file=sys.stderr)
+    sys.exit(1)
+sys.exit(2)

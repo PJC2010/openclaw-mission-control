@@ -118,11 +118,19 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Mission Control service tokens")
-    parser.add_argument("--created-by", default="cli", help="recorded in the audit log")
+    # `--created-by` is shared by every subcommand and accepted on either
+    # side of it: `tokens_cli create --created-by pete ...` is the natural
+    # way to type it, and argparse only allows that if the option is also
+    # declared on the subparser.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--created-by", default="cli", help="recorded in the audit log")
+
+    parser = argparse.ArgumentParser(
+        description="Mission Control service tokens", parents=[common]
+    )
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("list")
-    create = sub.add_parser("create")
+    sub.add_parser("list", parents=[common])
+    create = sub.add_parser("create", parents=[common])
     create.add_argument("--name", required=True)
     create.add_argument("--agent", required=True, help="agents.id UUID this token speaks for")
     create.add_argument(
@@ -130,7 +138,7 @@ def main() -> None:
         default=",".join(sorted(MINTABLE_SCOPES)),
         help=f"comma-separated; only {sorted(MINTABLE_SCOPES)} are mintable",
     )
-    revoke = sub.add_parser("revoke")
+    revoke = sub.add_parser("revoke", parents=[common])
     revoke.add_argument("--id", required=True)
     args = parser.parse_args()
     raise SystemExit(asyncio.run(_run(args)))

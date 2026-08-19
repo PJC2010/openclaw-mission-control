@@ -4,7 +4,7 @@
 VENV := api/.venv
 PY   := $(VENV)/bin/python
 
-.PHONY: setup test db-up db-down migrate migration-head revision dev web-build verify-phase0
+.PHONY: setup test db-up db-down migrate migration-head revision dev web-build verify-phase0 verify-phase2
 
 setup:
 	python3.12 -m venv $(VENV)
@@ -38,3 +38,6 @@ web-build:
 
 verify-phase0:
 	./scripts/verify-phase0.sh
+
+verify-phase2:
+	./scripts/verify-phase2.sh

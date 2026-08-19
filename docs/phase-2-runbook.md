@@ -127,6 +127,13 @@ Automated (`cd api && .venv/bin/pytest`, 114 tests) covers 1, 2, 3, 4, 5,
 8, 9, 11, 12, plus single-use claims and verdict delivery. `cd web && npm
 test` covers 10. Tests 6 and 7 are the Phase 0 identity suite.
 
+`make verify-phase2` runs the same flow over real HTTP against a live
+server — the pytest suite drives the app in-process, so this is the one
+that exercises uvicorn, real sockets, the token CLI, and the actual whois
+resolver. Only the tailscale *daemon* is stubbed, never our own code, so
+it can run anywhere; on the VPS you can drop `MC_TAILSCALE_BIN` from the
+script and it will use the real one.
+
 On the device, with the app installed to the home screen:
 
 - **13 — airplane mode.** Open a pending approval, enable airplane mode,
