@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<title>Mission Control</title>
+<style>
+  /* Phase 0 hello page. Dark by default (§13); phone-first; no external assets (C5). */
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: #0b0f14; color: #e6edf3;
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    min-height: 100dvh; display: grid; place-items: center;
+    padding: calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 16px);
+  }
+  main { width: 100%; max-width: 390px; }
+  .card { background: #11161d; border: 1px solid #1f2630; border-radius: 14px; padding: 20px; }
+  h1 { font-size: 1.35rem; letter-spacing: .02em; display: flex; align-items: center; gap: .55rem; }
+  .dot { width: .65rem; height: .65rem; border-radius: 50%; background: #2ea043; box-shadow: 0 0 8px #2ea04388; }
+  p.sub { color: #8b98a5; margin-top: .35rem; font-size: .9rem; }
+  dl { margin-top: 1.1rem; display: grid; grid-template-columns: auto 1fr; gap: .45rem .9rem; font-size: .92rem; }
+  dt { color: #8b98a5; }
+  dd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+  footer { margin-top: 1rem; color: #566270; font-size: .78rem; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1><span class="dot" aria-hidden="true"></span>Mission Control</h1>
+    <p class="sub">Phase 0 — foundation online. Served loopback-only, fronted by tailscale serve.</p>
+    <dl>
+      <dt>Operator</dt><dd id="login">…</dd>
+      <dt>Source</dt><dd id="source">…</dd>
+      <dt>API</dt><dd id="api">…</dd>
+    </dl>
+  </div>
+  <footer>tailnet-only · no funnel · identity via whois</footer>
+</main>
+<script>
+  // S3 habit from day one: everything rendered via textContent, never innerHTML.
+  const put = (id, value) => { document.getElementById(id).textContent = value; };
+  fetch("/v1/whoami").then(r => r.ok ? r.json() : Promise.reject(r.status)).then(me => {
+    put("login", me.login);
+    put("source", me.source_ip);
+  }).catch(err => { put("login", "unverified (" + err + ")"); put("source", "—"); });
+  fetch("/health").then(r => r.json()).then(h => {
+    put("api", h.service + " " + h.version + " · " + h.status);
+  }).catch(() => put("api", "unreachable"));
+</script>
+</body>
+</html>

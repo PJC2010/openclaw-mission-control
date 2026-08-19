@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+/* Mission Control palette — dark by default (§13); matches the Phase 0
+   hello page. */
+:root {
+  --mc-bg: #0b0f14;
+  --mc-card: #11161d;
+  --mc-border: #1f2630;
+  --mc-text: #e6edf3;
+  --mc-muted: #8b98a5;
+  --mc-faint: #566270;
+  --mc-green: #2ea043;
+  --mc-red: #f85149;
+  --mc-amber: #d29922;
+  --mc-blue: #58a6ff;
+}
+
+html {
+  color-scheme: dark;
+  background: var(--mc-bg);
+}
+
+body {
+  background: var(--mc-bg);
+  color: var(--mc-text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  min-height: 100dvh;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.card {
+  background: var(--mc-card);
+  border: 1px solid var(--mc-border);
+  border-radius: 14px;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

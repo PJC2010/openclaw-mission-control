@@ -1,0 +1,38 @@
+# Mission Control — infrastructure services.
+#
+# Phase 0 runs PostgreSQL 16 here; the API runs natively under systemd
+# (deploy/systemd/) so it can shell out to the host `tailscale` CLI for
+# whois verification (§11.3 layer 3) and bind host loopback directly (C2).
+# See docs/decisions.md "D3" for why the API is not containerized.
+#
+# The port mapping is deliberately 127.0.0.1-only: nothing in this stack is
+# reachable from off-host, tailnet included (C1/C2). All external access goes
+# through `tailscale serve` → 127.0.0.1.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: mission-control-db
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${MC_DB_SUPERUSER_PASSWORD:?set in .env / /etc/mission-control/env}
+      POSTGRES_DB: postgres
+      # Consumed by deploy/postgres/initdb/01-roles.sh on first init only.
+      MC_DB_MIGRATE_PASSWORD: ${MC_DB_MIGRATE_PASSWORD:?}
+      MC_DB_APP_PASSWORD: ${MC_DB_APP_PASSWORD:?}
+      MC_DB_READONLY_PASSWORD: ${MC_DB_READONLY_PASSWORD:?}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  pgdata:
