@@ -187,6 +187,135 @@ writing adapter code.
   namespace** (`BindReadOnlyPaths`), so §6.2's MUST-NOT-write holds at the
   OS level too, not just by code discipline.
 
+## P2. Phase 2 decisions (approvals) and verification findings
+
+Verified against OpenClaw 2026.7.x and hermes-agent 0.20.4 source,
+2026-08-19, before writing the bridges.
+
+### P2-A. OpenClaw — confirmed contract
+
+- Decisions are exactly `allow-once` | `allow-always` | `deny`
+  (`ApprovalDecisionSchema`). We send only `allow-once` or `deny`:
+  `allow-always` writes a standing allowlist entry in the runtime, which
+  §7.6 ("one approval, one execution") forbids us to grant.
+- `exec.approval.requested` / `plugin.approval.requested` share the
+  envelope `{approvalKind?, id, request, createdAtMs, expiresAtMs}`;
+  `expiresAtMs` is an absolute epoch-ms deadline. `approvalKind` is
+  OPTIONAL on the event, so kind is read from the record, never inferred.
+- `exec.approval.list` / `plugin.approval.list` take no params and return
+  a BARE ARRAY. There is no kind-agnostic list, so `system-agent`
+  approvals are not enumerable — see the gap in P2-C.
+- **`approval.resolve` fails closed by DENYING, not by erroring.** A wrong
+  `kind`, or a decision outside that record's `allowedDecisions`, commits
+  a deny with reason "malformed-verdict". A client bug therefore silently
+  kills the agent's command instead of returning an error. The bridge
+  always calls `approval.get` first, echoes the record's own kind back,
+  and validates the decision against `allowedDecisions`.
+- `approval.resolve` returns `{applied, approval}` and is race-safe;
+  `applied: false` means someone answered first.
+- Exec approvals time out at 30 minutes (hardcoded
+  `DEFAULT_EXEC_APPROVAL_TIMEOUT_MS`); plugin approvals at 2 minutes,
+  capped at 10. Our 15-minute TTL (§7.2) sits below the exec window, and
+  the bridge clamps its TTL to `expiresAtMs` so we never expire *after*
+  the runtime already gave up.
+
+### P2-B. OpenClaw — the fail-open knob (operator action required)
+
+`askFallback: "full"` makes a null decision — timeout, expiry, or no
+route — return `approvedByAsk: true`: the command RUNS. Default is
+`"deny"`. The effective value is `minSecurity(hostSecurity, agent.askFallback)`,
+so the dangerous tuple is `security: "full"` + `ask: "always"` +
+`askFallback: "full"` (the CLI `yolo` preset sets exactly this).
+
+The bridge asserts `askFallback == "deny"` at `defaults` and every
+`agents.<id>` entry on every connect, and reports the adapter degraded
+otherwise — a gate that can be bypassed by waiting is not a gate (C7).
+
+**Caveat the operator must act on:** `exec.approvals.*` is a reserved
+prefix that escalates to `operator.admin`, while the bridge deliberately
+holds only `operator.approvals`. The probe will therefore usually fail
+with a scope error, which we treat as *unverified* (degraded), never as
+verified-safe. Verify out of band on the VPS:
+
+```bash
+openclaw exec-policy get --json | grep -i askfallback   # expect "deny"
+openclaw exec-policy set --ask-fallback deny
+```
+
+### P2-C. OpenClaw — two visibility gaps, stated rather than papered over
+
+- `isApprovalRecordVisibleToClient` requires admin, the internal approval
+  runtime, a paired device listed in `approvalReviewerDeviceIds`, or an
+  exact requester match. A headless operator client can therefore receive
+  an **empty list**, which is indistinguishable from an idle system.
+  Mission Control must be paired as a device and added to
+  `approvalReviewerDeviceIds` — widening to `operator.admin` instead
+  would make the bridge credential full remote-execution-grade, which is
+  worse. The Phase 2 runbook's liveness drill exists to catch this.
+- **`system-agent` approvals are not gated by Mission Control.** There is
+  no enumeration path for that kind, so they are outside the queue.
+  Stated here and in the runbook rather than silently unhandled.
+
+### P2-D. Hermes — confirmed contract
+
+- `security.approval.transport: <plugin name>` selects the transport;
+  `transport_fallback` is read as `"builtin" if value == "builtin" else
+  None`, so every value other than the literal `builtin` fails closed.
+- The transport receives a frozen `ApprovalRequest` with `request_id`,
+  `digest`, `command`, `description`, `pattern_key(s)`, `surface`,
+  `timeout_seconds`, `allowed_choices`, and returns `request.respond(...)`
+  with `once` | `session` | `always` | `deny`. We send only `once` or
+  `deny` (`always` writes a permanent allowlist entry to config.yaml).
+- **`ApprovalRequest` carries no session identifier.** Correlation to a
+  run is only possible by pairing the `pre_approval_request` hook (which
+  runs on the agent-turn thread, where session context is valid) with the
+  transport call, joined on `request_id`. The transport callback runs on
+  a bare `threading.Thread` with no contextvars copy, so reading session
+  state inside it yields the wrong session under concurrency — the plugin
+  never does this.
+- Hook filtering is on `surface.startswith("transport:")`, not
+  `surface == "gateway"`.
+- **`approvals.mode` must be `manual`.** In `smart` mode an auxiliary LLM
+  runs in Phase 2.5, strictly before the transport, and an APPROVE verdict
+  returns immediately — Mission Control never sees the request and the
+  queue looks calm while commands execute. In `off`/`--yolo` nothing is
+  gated at all. The plugin logs CRITICAL at startup if the mode differs.
+
+### P2-E. Deliberate strengthenings beyond the spec text
+
+- **Kill switch is stricter than §7.7's letter.** The spec says pending
+  and new requests are denied. We additionally refuse to hand out an
+  already-granted approval that the wrapper has not yet collected: "Pause
+  All Agents" should mean nothing proceeds, and a wrapper polling one
+  second after the pause is not meaningfully different from a new request.
+- **One approval, one execution is enforced, not assumed** (§7.6). The
+  agent-facing poll is an atomic claim over `consumed_at`; a second poll
+  is refused. Without this a compromised wrapper could poll once and
+  execute repeatedly until expiry.
+- **Verdict delivery is a tracked obligation.** A decision for a runtime
+  that is blocking on us is not finished until that runtime confirms it.
+  Failed deliveries are retried on a timer and surfaced in the UI —
+  otherwise an operator's "no" is silently replaced by whatever the
+  runtime does on timeout.
+- **The poll returns `args_digest`** so a wrapper can prove the call it is
+  about to make is the call that was approved (approve-then-mutate).
+- **Bidi and invisible characters are neutralised for display**, not just
+  C0 controls. `JSON.stringify` escapes the C0 range on its own but passes
+  U+202E through, and a bidi override can make `rm -rf /` display as
+  something harmless while the approved bytes are unchanged (S3).
+- **`approvals:decide` is not a mintable scope.** C4 holds structurally
+  rather than by remembering to check a list.
+
+### P2-F. Carried debt (not shipped in Phase 2, tracked in the roadmap)
+
+- Restart divergence: if a runtime restarts, its records may go terminal
+  while ours stay pending. The 30s reconciliation narrows this window but
+  does not close it; blocking the decide route on an unconfirmed runtime
+  binding is Phase 6 hardening.
+- Provisioning assertions for the full "gate armed" tuple (OpenClaw
+  `security`/`ask`/`autoAllowSkills`, Hermes mode) are documented as
+  runbook steps and health-panel signals, not enforced from code.
+
 ## C. §18 open questions — status
 
 Untouched by Phase 0, still owed answers by the operator: fallback

@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build"
+    "build": "next build",
+    "test": "node scripts/test-inert-rendering.mjs"
   },
   "dependencies": {
     "next": "^15.4.0",

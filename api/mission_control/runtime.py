@@ -10,6 +10,7 @@ from typing import Any
 from .adapters import AgentAdapter
 from .adapters.hermes import HermesAdapter
 from .adapters.openclaw import OpenClawAdapter
+from .bridges import OpenClawApprovalBridge
 from .config import Settings
 from .models.enums import AgentRuntime
 from .normalizer import Normalizer
@@ -25,6 +26,7 @@ class AdapterSupervisor:
         self._normalizer = normalizer
         self._approvals = approvals
         self.adapters: dict[uuid.UUID, AgentAdapter] = {}
+        self.bridges: dict[uuid.UUID, OpenClawApprovalBridge] = {}
 
     async def start(self) -> None:
         settings = self._settings
@@ -39,7 +41,16 @@ class AdapterSupervisor:
                 instance_key=f"openclaw:{settings.openclaw_url}",
                 display_name=settings.openclaw_display_name,
             )
-            self.adapters[agent_id] = OpenClawAdapter(agent_id, settings, self._normalizer)
+            bridge = None
+            if self._approvals is not None:
+                # The RPC route: the gateway raises approvals, we decide.
+                bridge = OpenClawApprovalBridge(
+                    agent_id, settings, self._approvals, self._normalizer
+                )
+                self.bridges[agent_id] = bridge
+            self.adapters[agent_id] = OpenClawAdapter(
+                agent_id, settings, self._normalizer, approval_bridge=bridge
+            )
         if settings.hermes_home:
             agent_id = await self._normalizer.register_agent(
                 AgentRuntime.HERMES,
@@ -61,7 +72,14 @@ class AdapterSupervisor:
             await adapter.stop()
 
     def health(self) -> dict[str, dict[str, object]]:
-        return {
-            str(agent_id): {"adapter": adapter.name, **adapter.health().as_json()}
-            for agent_id, adapter in self.adapters.items()
-        }
+        report: dict[str, dict[str, object]] = {}
+        for agent_id, adapter in self.adapters.items():
+            entry: dict[str, object] = {"adapter": adapter.name, **adapter.health().as_json()}
+            bridge = self.bridges.get(agent_id)
+            if bridge is not None:
+                entry["approval_bridge"] = {
+                    "attached": bridge._client is not None,  # noqa: SLF001
+                    "fail_open_risk": bridge.fail_open_risk,
+                }
+            report[str(agent_id)] = entry
+        return report

@@ -1,0 +1,3 @@
+name: mission-control-approval
+version: "1.0"
+description: Routes Hermes approval requests to Mission Control for a human decision

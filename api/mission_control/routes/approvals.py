@@ -159,10 +159,13 @@ async def poll_decision(
         raise HTTPException(status_code=404, detail="approval not found")
 
     service = request.app.state.approvals
+    # Claim semantics, not a read: an approval authorises exactly one
+    # execution (§7.6), and `args_digest` comes back so the wrapper can
+    # prove the call it is about to make is the call that was approved.
     outcome = (
         await service.wait_for_decision(approval_id, wait)
         if wait > 0
-        else await service.get_decision(approval_id)
+        else await service.claim_decision(approval_id)
     )
     return outcome.as_json()
 
@@ -189,6 +192,10 @@ def _approval_json(approval: Approval, agents: dict[str, str]) -> dict[str, Any]
         "decided_via": approval.decided_via.value if approval.decided_via else None,
         "decision_note": approval.decision_note,
         "external_run_id": approval.external_run_id,
+        "consumed_at": approval.consumed_at.isoformat() if approval.consumed_at else None,
+        "resolution_state": approval.resolution_state,
+        "resolution_attempts": approval.resolution_attempts,
+        "resolution_error": approval.resolution_error,
     }
 
 
@@ -214,11 +221,16 @@ async def list_approvals(
                 )
             ).all()
         )
-    kill_switch = await request.app.state.approvals.kill_switch_state()
+    service = request.app.state.approvals
+    kill_switch = await service.kill_switch_state()
     return {
         "approvals": [_approval_json(a, agents) for a in approvals],
         "pending_count": pending_count,
         "kill_switch": kill_switch,
+        # Verdicts the runtime has not confirmed: until delivery lands, the
+        # runtime is deciding on its own timeout rather than on the
+        # operator's answer, and that must be visible.
+        "undelivered": await service.resolution_summary(),
     }
 
 

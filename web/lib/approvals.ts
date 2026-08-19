@@ -25,6 +25,10 @@ export type Approval = {
   decided_via: string | null;
   decision_note: string | null;
   external_run_id: string | null;
+  consumed_at?: string | null;
+  resolution_state?: string;
+  resolution_attempts?: number;
+  resolution_error?: string | null;
 };
 
 export type ApprovalDetail = Approval & {
@@ -45,10 +49,23 @@ export const riskColor: Record<RiskLevel, string> = {
   critical: "var(--mc-red)",
 };
 
-// C0 and C1 control characters, minus \n and \t which <pre> renders safely.
+// Characters that can act rather than display:
+//   C0/C1 controls (minus \n and \t, which <pre> renders harmlessly),
+//   and the invisible/bidi formatting set — soft hyphen, zero-width
+//   joiners, LRM/RLM, the bidi embedding+override block, the isolates,
+//   and BOM.
+//
+// The bidi overrides matter as much as ESC here. U+202E reverses the
+// visual order of everything after it, so an argument reading
+// "rm -rf /" can be made to display as something harmless while the
+// approved bytes are unchanged. JSON.stringify escapes the C0 range on
+// its own but passes these through untouched, which is precisely the
+// "payload aimed at the operator's eyes" S3 warns about.
+//
 // Built from escapes so no literal control byte ever sits in this source.
 const CONTROL_CHARS = new RegExp(
-  "[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F]",
+  "[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F" +
+    "\\u00AD\\u200B-\\u200F\\u202A-\\u202E\\u2060\\u2066-\\u2069\\uFEFF]",
   "g"
 );
 
@@ -62,7 +79,9 @@ const CONTROL_CHARS = new RegExp(
 export function visibleControlChars(text: string): string {
   return text.replace(CONTROL_CHARS, (char) => {
     const code = char.codePointAt(0)!;
-    return "\\x" + code.toString(16).padStart(2, "0");
+    return code <= 0xff
+      ? "\\x" + code.toString(16).padStart(2, "0")
+      : "\\u" + code.toString(16).padStart(4, "0");
   });
 }
 

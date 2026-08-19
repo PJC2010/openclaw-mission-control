@@ -470,3 +470,151 @@ async def test_no_token_is_unauthenticated(app):
         )
     assert response.status_code == 401
 
+
+
+# ── §7.6 one approval, one execution ─────────────────────────────────────
+
+
+async def test_approval_can_be_claimed_only_once(app, token):
+    """A compromised or buggy wrapper must not be able to poll an approval
+    twice and execute twice."""
+    async with client(app) as http:
+        created = await create_request(http, token, key="key-claim-001")
+        approval_id = created.json()["approval_id"]
+        await http.post(
+            f"/v1/approvals/{approval_id}/decision",
+            headers=serve_headers(),
+            json={"approve": True},
+        )
+        first = (
+            await http.get(f"/v1/approvals/{approval_id}/decision", headers=agent_headers(token))
+        ).json()
+        second = (
+            await http.get(f"/v1/approvals/{approval_id}/decision", headers=agent_headers(token))
+        ).json()
+
+    assert first["allowed"] is True
+    assert first["already_consumed"] is False
+    # Still reports `approved` — that is the truth — but permission is spent.
+    assert second["state"] == "approved"
+    assert second["allowed"] is False
+    assert second["already_consumed"] is True
+
+
+async def test_concurrent_claims_yield_exactly_one_permission(app, token):
+    created_id = None
+    async with client(app) as http:
+        created = await create_request(http, token, key="key-claim-002")
+        created_id = created.json()["approval_id"]
+        await http.post(
+            f"/v1/approvals/{created_id}/decision",
+            headers=serve_headers(),
+            json={"approve": True},
+        )
+        results = await asyncio.gather(
+            *[
+                http.get(
+                    f"/v1/approvals/{created_id}/decision", headers=agent_headers(token)
+                )
+                for _ in range(8)
+            ]
+        )
+    allowed = [r.json()["allowed"] for r in results]
+    assert allowed.count(True) == 1, f"expected exactly one grant, got {allowed}"
+
+
+async def test_claim_returns_args_digest_for_mutation_check(app, token):
+    """The wrapper needs to prove the call it is about to make is the call
+    that was approved."""
+    async with client(app) as http:
+        created = await create_request(
+            http, token, key="key-digest-001", args={"path": "/workspace/x.txt"}
+        )
+        approval_id = created.json()["approval_id"]
+        await http.post(
+            f"/v1/approvals/{approval_id}/decision",
+            headers=serve_headers(),
+            json={"approve": True},
+        )
+        outcome = (
+            await http.get(f"/v1/approvals/{approval_id}/decision", headers=agent_headers(token))
+        ).json()
+        detail = (
+            await http.get(f"/v1/approvals/{approval_id}", headers=serve_headers())
+        ).json()
+    assert outcome["args_digest"]
+    assert outcome["args_digest"] == detail["args_digest"]
+
+
+async def test_denied_approval_is_not_consumable(app, token):
+    async with client(app) as http:
+        created = await create_request(http, token, key="key-claim-003")
+        approval_id = created.json()["approval_id"]
+        await http.post(
+            f"/v1/approvals/{approval_id}/decision",
+            headers=serve_headers(),
+            json={"approve": False},
+        )
+        outcome = (
+            await http.get(f"/v1/approvals/{approval_id}/decision", headers=agent_headers(token))
+        ).json()
+    assert outcome["allowed"] is False
+    assert outcome["already_consumed"] is False
+
+
+# ── verdict delivery is an obligation, not a log line ────────────────────
+
+
+async def test_bridged_decision_is_marked_undelivered_until_confirmed(app, token, agent_id):
+    """A verdict for a runtime blocking on us is not done until the runtime
+    has it; otherwise the runtime's own timeout silently replaces the
+    operator's answer."""
+    from mission_control.models import Approval
+
+    service = app.state.approvals
+    snapshot, _ = await service.create(
+        agent_id=agent_id,
+        idempotency_key="bridged-001",
+        tool_name="exec",
+        tool_args={"command": "ls"},
+        source="openclaw_rpc",
+        external_ref="gw-approval-1",
+    )
+    await service.decide(snapshot.id, approve=True, operator_login=OPERATOR_LOGIN)
+
+    async with app.state.db_sessions() as session:
+        row = await session.get(Approval, snapshot.id)
+    assert row.resolution_state == "pending"
+    assert (await service.resolution_summary())["pending"] == 1
+
+    await service.mark_resolution(snapshot.id, confirmed=False, error="gateway unreachable")
+    async with app.state.db_sessions() as session:
+        row = await session.get(Approval, snapshot.id)
+    assert row.resolution_state == "failed"
+    assert row.resolution_attempts == 1
+    assert "unreachable" in row.resolution_error
+    assert [s.id for s in await service.undelivered()] == [snapshot.id]
+
+    await service.mark_resolution(snapshot.id, confirmed=True)
+    async with app.state.db_sessions() as session:
+        row = await session.get(Approval, snapshot.id)
+    assert row.resolution_state == "confirmed"
+    assert row.resolution_confirmed_at is not None
+    assert await service.undelivered() == []
+
+
+async def test_http_sourced_approvals_need_no_delivery(app, token):
+    """The HTTP wrapper polls for itself, so there is nothing to deliver."""
+    from mission_control.models import Approval
+
+    async with client(app) as http:
+        created = await create_request(http, token, key="key-nodelivery-001")
+        approval_id = created.json()["approval_id"]
+        await http.post(
+            f"/v1/approvals/{approval_id}/decision",
+            headers=serve_headers(),
+            json={"approve": True},
+        )
+    async with app.state.db_sessions() as session:
+        row = await session.get(Approval, uuid.UUID(approval_id))
+    assert row.resolution_state == "not_required"

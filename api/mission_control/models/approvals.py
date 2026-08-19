@@ -15,7 +15,7 @@ import datetime
 import uuid
 from typing import Any
 
-from sqlalchemy import Boolean, ForeignKey, Index, String, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -44,6 +44,12 @@ class Approval(Base):
         # One mirror row per runtime-side approval id (RPC route): a replayed
         # gateway event must not open a second pending request for one action.
         UniqueConstraint("agent_id", "external_ref", name="uq_approvals_agent_id_external_ref"),
+        Index(
+            "ix_approvals_resolution_pending",
+            "resolution_state",
+            "decided_at",
+            postgresql_where=text("resolution_state IN ('pending','failed')"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, server_default=UUID_DEFAULT)
@@ -81,6 +87,26 @@ class Approval(Base):
     decided_by: Mapped[str | None] = mapped_column(Text)  # tailnet login (§11.2)
     decided_via: Mapped[DecidedVia | None] = mapped_column(DECIDED_VIA)
     decision_note: Mapped[str | None] = mapped_column(Text)
+
+    # §7.6 "one approval, one execution": an approved row is claimable
+    # exactly once. Without this a compromised wrapper polls once and
+    # executes twice, and the queue cannot tell the difference.
+    consumed_at: Mapped[datetime.datetime | None]
+
+    # A decision that never reaches the runtime is a fail-open: the runtime
+    # record stays pending, times out, and whatever its own fallback says
+    # happens instead of what the operator said. These track delivery so an
+    # undelivered verdict is visible rather than silent.
+    #   not_required — nothing to deliver (HTTP wrapper polls for itself)
+    #   pending      — queued for delivery to the runtime
+    #   confirmed    — the runtime accepted our verdict
+    #   failed       — delivery is failing; the operator needs to know
+    resolution_state: Mapped[str] = mapped_column(
+        Text, default="not_required", server_default="not_required"
+    )
+    resolution_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    resolution_error: Mapped[str | None] = mapped_column(Text)
+    resolution_confirmed_at: Mapped[datetime.datetime | None]
 
 
 class ApprovalPolicy(Base):

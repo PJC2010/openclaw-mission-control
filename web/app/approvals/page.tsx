@@ -6,19 +6,25 @@ import { useFreshness } from "@/lib/useFreshness";
 import { getJSON } from "@/lib/api";
 import type { Approval, KillSwitch } from "@/lib/approvals";
 
+type Undelivered = { pending: number; failed: number };
+
 export default function ApprovalsPage() {
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [killSwitch, setKillSwitch] = useState<KillSwitch>({ engaged: false });
   const [showAll, setShowAll] = useState(false);
+  const [undelivered, setUndelivered] = useState<Undelivered>({ pending: 0, failed: 0 });
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     const query = showAll ? "" : "?state=pending";
-    const body = await getJSON<{ approvals: Approval[]; kill_switch: KillSwitch }>(
-      `/v1/approvals${query}`
-    );
+    const body = await getJSON<{
+      approvals: Approval[];
+      kill_switch: KillSwitch;
+      undelivered: Undelivered;
+    }>(`/v1/approvals${query}`);
     setApprovals(body.approvals);
     setKillSwitch(body.kill_switch);
+    setUndelivered(body.undelivered ?? { pending: 0, failed: 0 });
   }, [showAll]);
 
   const { lastSyncLabel, stale, error, refresh: run } = useFreshness(refresh, 8000);
@@ -41,6 +47,19 @@ export default function ApprovalsPage() {
   return (
     <main className="flex flex-col gap-3">
       <KillSwitchBanner engaged={killSwitch.engaged} />
+
+      {undelivered.failed > 0 ? (
+        // Until a verdict reaches the runtime, the runtime is deciding on
+        // its own timeout rather than on the operator's answer.
+        <div
+          className="rounded-xl border-2 px-4 py-3 text-sm"
+          style={{ borderColor: "var(--mc-red)", color: "var(--mc-red)" }}
+        >
+          {undelivered.failed} decision{undelivered.failed === 1 ? "" : "s"} could not be
+          delivered to the runtime. Until delivery succeeds the runtime is falling back to its
+          own timeout, not your answer. Check the agent&apos;s connection.
+        </div>
+      ) : null}
 
       <div className="flex items-center gap-2 text-xs" style={{ color: stale ? "var(--mc-amber)" : "var(--mc-muted)" }}>
         <span>synced {lastSyncLabel}</span>

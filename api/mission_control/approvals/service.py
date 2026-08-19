@@ -75,6 +75,8 @@ class ApprovalSnapshot:
     decision_note: str | None
     expires_at: datetime.datetime
     created_at: datetime.datetime
+    resolution_state: str = "not_required"
+    resolution_attempts: int = 0
 
     @property
     def allowed(self) -> bool:
@@ -91,16 +93,25 @@ class DecisionOutcome:
     decided_via: DecidedVia | None = None
     note: str | None = None
     reason: str = ""
+    # True only on the single poll that successfully claimed an approval.
+    claimed: bool = False
+    already_consumed: bool = False
+    # Lets the wrapper prove the call it is about to make is the call that
+    # was approved (approve-then-mutate defence).
+    args_digest: str | None = None
 
     @property
     def allowed(self) -> bool:
-        return self.state is ApprovalState.APPROVED
+        """Permission to execute — granted at most once per approval (§7.6)."""
+        return self.state is ApprovalState.APPROVED and self.claimed
 
     def as_json(self) -> dict[str, Any]:
         return {
             "approval_id": str(self.approval_id),
             "state": self.state.value,
             "allowed": self.allowed,
+            "already_consumed": self.already_consumed,
+            "args_digest": self.args_digest,
             "decided_via": self.decided_via.value if self.decided_via else None,
             "note": self.note,
             "reason": self.reason,
@@ -378,6 +389,10 @@ class ApprovalService:
                 approval.decided_by = operator_login
                 approval.decision_note = note
 
+            if approval.source != "http":
+                # A verdict for a runtime that is blocking on us is not
+                # delivered until the runtime says so.
+                approval.resolution_state = "pending"
             await self._audit(
                 session,
                 actor=operator_login,
@@ -418,14 +433,54 @@ class ApprovalService:
                 state=approval.state,
                 decided_via=approval.decided_via,
                 note=approval.decision_note,
+                already_consumed=approval.consumed_at is not None,
+                args_digest=approval.args_digest,
             )
+
+    async def claim_decision(self, approval_id: uuid.UUID) -> DecisionOutcome:
+        """Read the decision AND consume it if it is an approval.
+
+        §7.6: one approval, one execution. The claim is a single atomic
+        compare-and-set, so two concurrent pollers cannot both be told yes,
+        and a replayed poll after a crash is refused rather than silently
+        re-authorising the action.
+        """
+        outcome = await self.get_decision(approval_id)
+        if outcome.state is not ApprovalState.APPROVED:
+            return outcome
+        now = datetime.datetime.now(datetime.timezone.utc)
+        async with self._sessions() as session:
+            claimed_id = await session.scalar(
+                update(Approval)
+                .where(
+                    Approval.id == approval_id,
+                    Approval.state == ApprovalState.APPROVED,
+                    Approval.consumed_at.is_(None),
+                )
+                .values(consumed_at=now)
+                .returning(Approval.id)
+            )
+            await session.commit()
+        if claimed_id is None:
+            security_log.warning(
+                "approval %s was polled again after being consumed — a wrapper "
+                "retry, or an attempt to execute one approval twice (§7.6)",
+                approval_id,
+            )
+            outcome.already_consumed = True
+            outcome.claimed = False
+            outcome.reason = "this approval was already used; request a new one"
+            return outcome
+        outcome.claimed = True
+        outcome.already_consumed = False
+        return outcome
 
     async def wait_for_decision(self, approval_id: uuid.UUID, wait_seconds: float) -> DecisionOutcome:
         """Long-poll for a terminal state. On timeout returns the current
         (pending) state — the wrapper re-polls; it never treats a timeout
         as permission."""
         deadline = min(wait_seconds, self._settings.approval_long_poll_max_seconds)
-        outcome = await self.get_decision(approval_id)
+        outcome = await self.claim_decision(approval_id)
         if outcome.state in TERMINAL_STATES or deadline <= 0:
             return outcome
         event = self._waiters.setdefault(approval_id, asyncio.Event())
@@ -436,7 +491,7 @@ class ApprovalService:
         finally:
             if event.is_set():
                 self._waiters.pop(approval_id, None)
-        return await self.get_decision(approval_id)
+        return await self.claim_decision(approval_id)
 
     def _wake(self, approval_id: uuid.UUID) -> None:
         event = self._waiters.get(approval_id)
@@ -467,6 +522,8 @@ class ApprovalService:
                 approval.decided_at = now
                 approval.decided_via = DecidedVia.TIMEOUT
                 approval.decision_note = "expired without a decision"
+                if approval.source != "http":
+                    approval.resolution_state = "pending"
                 await self._audit(
                     session, actor="system", actor_source=ActorSource.SYSTEM,
                     action="approval.expired", entity_id=str(approval.id),
@@ -534,6 +591,8 @@ class ApprovalService:
                     approval.decided_via = DecidedVia.KILL_SWITCH
                     approval.decided_by = operator_login
                     approval.decision_note = "denied: all agents paused (kill switch engaged)"
+                    if approval.source != "http":
+                        approval.resolution_state = "pending"
                     denied.append(self._snapshot(approval))
 
             await self._audit(
@@ -557,6 +616,59 @@ class ApprovalService:
             "ENGAGED" if engaged else "released", operator_login, len(denied),
         )
         return {"engaged": engaged, "pending_denied": len(denied)}
+
+    # ── verdict delivery to the runtimes ─────────────────────────────────
+
+    async def undelivered(self, limit: int = 50) -> list[ApprovalSnapshot]:
+        """Decided approvals whose verdict the runtime has not confirmed."""
+        async with self._sessions() as session:
+            rows = (
+                await session.scalars(
+                    select(Approval)
+                    .where(Approval.resolution_state.in_(("pending", "failed")))
+                    .order_by(Approval.decided_at)
+                    .limit(limit)
+                )
+            ).all()
+            return [self._snapshot(row) for row in rows]
+
+    async def mark_resolution(
+        self, approval_id: uuid.UUID, *, confirmed: bool, error: str | None = None
+    ) -> None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        async with self._sessions() as session:
+            approval = await session.get(Approval, approval_id)
+            if approval is None:
+                return
+            approval.resolution_attempts = (approval.resolution_attempts or 0) + 1
+            if confirmed:
+                approval.resolution_state = "confirmed"
+                approval.resolution_confirmed_at = now
+                approval.resolution_error = None
+            else:
+                approval.resolution_state = "failed"
+                approval.resolution_error = (error or "")[:2000]
+                security_log.error(
+                    "verdict for approval %s has not reached its runtime after %d "
+                    "attempts: %s — until it does, the runtime is deciding on its "
+                    "own timeout, not on the operator's answer",
+                    approval_id, approval.resolution_attempts, error,
+                )
+            await session.commit()
+
+    async def resolution_summary(self) -> dict[str, int]:
+        async with self._sessions() as session:
+            rows = (
+                await session.scalars(
+                    select(Approval.resolution_state).where(
+                        Approval.resolution_state.in_(("pending", "failed"))
+                    )
+                )
+            ).all()
+        summary = {"pending": 0, "failed": 0}
+        for state in rows:
+            summary[state] = summary.get(state, 0) + 1
+        return summary
 
     async def _kill_switch_on(self, session: AsyncSession) -> bool:
         flag = await session.get(SystemFlag, KILL_SWITCH_KEY)
@@ -618,6 +730,8 @@ class ApprovalService:
             decision_note=approval.decision_note,
             expires_at=approval.expires_at,
             created_at=approval.created_at,
+            resolution_state=approval.resolution_state or "not_required",
+            resolution_attempts=approval.resolution_attempts or 0,
         )
 
     def _audit_body(self, approval: Approval) -> dict[str, Any]:

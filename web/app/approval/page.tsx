@@ -173,6 +173,19 @@ function ApprovalView() {
           {approval.decision_note ? (
             <p className="mt-2 whitespace-pre-wrap text-xs">{approval.decision_note}</p>
           ) : null}
+          {approval.resolution_state === "pending" || approval.resolution_state === "failed" ? (
+            <p className="mt-2 text-xs" style={{ color: "var(--mc-red)" }}>
+              Not yet delivered to the runtime
+              {approval.resolution_attempts ? ` (${approval.resolution_attempts} attempts)` : ""}
+              {approval.resolution_error ? `: ${approval.resolution_error}` : ""}
+            </p>
+          ) : null}
+          {approval.consumed_at ? (
+            <p className="mt-1 text-xs" style={{ color: "var(--mc-faint)" }}>
+              used once at {new Date(approval.consumed_at).toLocaleTimeString()} — a second
+              attempt would be refused
+            </p>
+          ) : null}
           <Link href="/approvals/" className="mt-3 inline-block text-xs" style={{ color: "var(--mc-blue)" }}>
             back to queue →
           </Link>

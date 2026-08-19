@@ -19,6 +19,7 @@ import hashlib
 import logging
 import random
 import uuid
+from typing import Any
 
 from ... import __version__
 from ...config import Settings
@@ -36,14 +37,24 @@ BACKOFF_CAP_S = 60.0  # §6.1
 AUDIT_OVERLAP_MS = 5_000
 AUDIT_PAGE_LIMIT = 500
 SESSIONS_REFRESH_S = 60.0
+# Gateway approval broadcasts are dropIfSlow and scope-narrowed, so the
+# event stream is a hint, never the record: re-list on a timer as well.
+APPROVAL_RECONCILE_S = 30.0
 LEDGER_RETENTION = datetime.timedelta(days=30)
 
 
 class OpenClawAdapter:
     name = "openclaw"
 
-    def __init__(self, agent_id: uuid.UUID, settings: Settings, normalizer: Normalizer) -> None:
+    def __init__(
+        self,
+        agent_id: uuid.UUID,
+        settings: Settings,
+        normalizer: Normalizer,
+        approval_bridge: Any | None = None,
+    ) -> None:
         self.agent_id = agent_id
+        self._bridge = approval_bridge
         self._settings = settings
         self._normalizer = normalizer
         self._key_prefix = f"oc:{hashlib.sha256(settings.openclaw_url.encode()).hexdigest()[:10]}"
@@ -84,12 +95,17 @@ class OpenClawAdapter:
     async def _run(self) -> None:
         attempt = 0
         while True:
+            scopes = ["operator.read"]
+            if self._bridge is not None:
+                # Only what the approval route needs; never operator.write.
+                scopes.append("operator.approvals")
             client = OpenClawClient(
                 self._settings.openclaw_url,
                 self._settings.openclaw_token,
                 client_version=__version__,
                 on_event=self._on_event,
                 rpc_timeout_s=self._settings.openclaw_rpc_timeout_s,
+                scopes=scopes,
             )
             try:
                 hello = await client.connect()
@@ -106,6 +122,21 @@ class OpenClawAdapter:
                     AgentStatus(status="up", heartbeat_at=self._now()),
                 )
                 self._health = AdapterHealth(ok=True, state="running")
+
+                if self._bridge is not None:
+                    self._bridge.attach(client)
+                    # Re-checked on every connect: exec policy is editable
+                    # at runtime, and a gate that can be waited out is not
+                    # a gate (C7).
+                    risk = await self._bridge.verify_fail_closed()
+                    if risk:
+                        self._health = AdapterHealth(
+                            ok=False, state="degraded", detail=risk
+                        )
+                    mirrored = await self._bridge.bootstrap_pending()
+                    if mirrored:
+                        log.info("mirrored %d pending gateway approvals", mirrored)
+
                 await self._observe(client)
             except asyncio.CancelledError:
                 await client.close()
@@ -120,6 +151,8 @@ class OpenClawAdapter:
                 log.warning("openclaw connection lost: %r", exc)
                 self._health = AdapterHealth(ok=False, state="degraded", detail=repr(exc))
             finally:
+                if self._bridge is not None:
+                    self._bridge.detach()
                 await client.close()
             await self._normalizer.set_agent_status(
                 self.agent_id, AgentStatus(status="down", detail="gateway disconnected")
@@ -133,14 +166,26 @@ class OpenClawAdapter:
         """Connected steady state: poll the audit ledger; refresh session
         lineage on change signals or every SESSIONS_REFRESH_S."""
         await self._refresh_sessions(client)
-        last_sessions_refresh = asyncio.get_running_loop().time()
+        loop = asyncio.get_running_loop()
+        last_sessions_refresh = loop.time()
+        last_approval_reconcile = loop.time()
         while not client.closed.is_set():
             await self._poll_audit(client)
-            now = asyncio.get_running_loop().time()
+            now = loop.time()
             if self._sessions_dirty.is_set() or now - last_sessions_refresh > SESSIONS_REFRESH_S:
                 self._sessions_dirty.clear()
                 await self._refresh_sessions(client)
                 last_sessions_refresh = now
+            if self._bridge is not None and now - last_approval_reconcile > APPROVAL_RECONCILE_S:
+                last_approval_reconcile = now
+                try:
+                    # Two obligations, both easy to lose silently: approvals
+                    # raised while we were not listening, and verdicts that
+                    # never reached the gateway.
+                    await self._bridge.reconcile()
+                    await self._bridge.retry_undelivered()
+                except Exception:  # noqa: BLE001 — never kill the socket for this
+                    log.exception("approval reconciliation failed")
             try:
                 await asyncio.wait_for(
                     client.closed.wait(), timeout=self._settings.openclaw_poll_interval_s
@@ -242,6 +287,24 @@ class OpenClawAdapter:
                 )
         elif event.event in ("sessions.changed", "presence"):
             self._sessions_dirty.set()
+        elif event.event in (
+            "exec.approval.requested",
+            "plugin.approval.requested",
+            "openclaw.approval.requested",
+        ):
+            if self._bridge is not None:
+                await self._bridge.handle_requested(event.payload)
+        elif event.event in (
+            "exec.approval.resolved",
+            "plugin.approval.resolved",
+            "openclaw.approval.resolved",
+        ):
+            # Someone (or something) else answered. Our own resolve is
+            # race-safe, so this is informational.
+            log.info(
+                "gateway reported approval %s resolved as %s",
+                event.payload.get("id"), event.payload.get("decision"),
+            )
         elif event.event == "shutdown":
             await self._normalizer.set_agent_status(
                 self.agent_id, AgentStatus(status="down", detail="gateway announced shutdown")
