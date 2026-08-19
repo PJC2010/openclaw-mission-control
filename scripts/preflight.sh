@@ -75,6 +75,17 @@ avail=$(df -Pk /opt 2>/dev/null | awk 'NR==2{print int($4/1024/1024)}')
 if [ -n "${avail:-}" ] && [ "$avail" -ge 5 ]; then ok "${avail}G free on /opt"
 elif [ -n "${avail:-}" ]; then warn "only ${avail}G free on /opt (Postgres + images want ~5G)"; fi
 
+ENV_FILE=/etc/mission-control/env
+if [ -r "$ENV_FILE" ]; then
+  if grep -nE '^[A-Z_]+=[^"'"'"']*[[:space:]]' "$ENV_FILE" >/dev/null 2>&1; then
+    bad "$ENV_FILE has unquoted values containing spaces"
+    note "sourced by shell, those are truncated at the space and the rest is executed"
+    grep -nE '^[A-Z_]+=[^"'"'"']*[[:space:]]' "$ENV_FILE" | cut -d= -f1 | sed 's/^/    line /'
+  else
+    ok "env file values are safely quoted"
+  fi
+fi
+
 head_ "Tailscale (C1: tailnet only, never Funnel)"
 
 if command -v tailscale >/dev/null 2>&1; then
