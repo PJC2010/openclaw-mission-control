@@ -29,6 +29,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               Mission Control
             </Link>
             <nav className="flex gap-4 text-sm" style={{ color: "var(--mc-muted)" }}>
+              <Link href="/approvals/" className="hover:text-white">
+                Approvals
+              </Link>
               <Link href="/runs/" className="hover:text-white">
                 Runs
               </Link>

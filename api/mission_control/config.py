@@ -69,6 +69,25 @@ class Settings(BaseSettings):
     # S7's no-truncation rule applies to approvals.tool_args, stored fully).
     event_payload_text_limit: int = 16384
 
+    # ── Phase 2: approvals (§7) ──────────────────────────────────────────
+    # §7.2 [DECIDED] 15 minutes — generous because notification delivery
+    # over a private tailnet is best-effort.
+    approval_ttl_seconds: int = 900
+    # §7.8 flooding defense. Beyond this, requests auto-deny and alert.
+    approval_rate_limit_per_hour: int = 20
+    # How often the TTL sweeper looks for expired pending approvals.
+    approval_expiry_sweep_seconds: float = 5.0
+    # Upper bound on a wrapper's ?wait= long poll (§7.1 step 4).
+    approval_long_poll_max_seconds: float = 30.0
+    # Comma-separated workspace roots. Writes outside these are `critical`
+    # (§7.4). Empty means nothing can be proven contained, so every path
+    # write grades critical — deliberately noisy until configured.
+    workspace_allowlist: str = ""
+
+    @property
+    def workspace_roots(self) -> list[str]:
+        return [part.strip() for part in self.workspace_allowlist.split(",") if part.strip()]
+
     @field_validator("bind_host")
     @classmethod
     def _require_loopback(cls, value: str) -> str:

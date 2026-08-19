@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 from dataclasses import dataclass
 from email.header import decode_header, make_header
 
@@ -52,6 +53,20 @@ FORWARDED_HEADERS = ("x-forwarded-for", "x-forwarded-proto", "x-forwarded-host")
 HEADER_FUNNEL = "tailscale-funnel-request"
 
 DEFAULT_EXEMPT_PATHS = frozenset({"/health"})
+
+# The AGENT protocol endpoints (§7.1). These are exempt from operator
+# identity because they use the other auth path entirely — a service token
+# (§7.5) checked by the route's own dependency. They are matched by METHOD
+# and path together: GET .../decision is an agent poll, while POST to the
+# same path is the operator decision and must never be exempt (C4).
+AGENT_ROUTES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("POST", re.compile(r"^/v1/approvals/?$")),
+    ("GET", re.compile(r"^/v1/approvals/[^/]+/decision/?$")),
+)
+
+
+def is_agent_route(method: str, path: str) -> bool:
+    return any(method == verb and pattern.match(path) for verb, pattern in AGENT_ROUTES)
 
 
 @dataclass(frozen=True)
@@ -121,6 +136,12 @@ class OperatorIdentityMiddleware:
         if scope["path"] in self.exempt_paths:
             await self.app(scope, receive, send)
             return
+        # Agent protocol endpoints authenticate via the service-token path;
+        # the route dependency enforces it. Never fall through to operator
+        # identity here — the two paths stay disjoint (§7.5).
+        if is_agent_route(scope.get("method", ""), scope["path"]):
+            await self.app(scope, receive, send)
+            return
 
         try:
             operator = await self._authenticate(scope)
@@ -156,6 +177,21 @@ class OperatorIdentityMiddleware:
             )
 
         headers = Headers(scope=scope)
+
+        # C4 / §17 test 5: a service token must never reach an operator
+        # endpoint — above all POST /v1/approvals/{id}/decision. Operator
+        # auth is identity-header only and never uses bearer tokens, so a
+        # bearer here is either a confused agent or an escalation attempt.
+        # Either way it is a security event, and 403 (not 401) is the
+        # honest answer: the credential was understood and refused.
+        if headers.get("authorization") is not None:
+            raise IdentityRejected(
+                403,
+                "service tokens cannot be used on operator endpoints",
+                "service_token_on_operator_path",
+                path=scope.get("path"),
+                method=scope.get("method"),
+            )
 
         if headers.get(HEADER_FUNNEL) is not None:
             raise IdentityRejected(

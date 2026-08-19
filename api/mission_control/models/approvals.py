@@ -15,7 +15,8 @@ import datetime
 import uuid
 from typing import Any
 
-from sqlalchemy import Boolean, ForeignKey, Index, String, Text, text
+from sqlalchemy import Boolean, ForeignKey, Index, String, Text, UniqueConstraint, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -40,6 +41,9 @@ class Approval(Base):
     __table_args__ = (
         Index("ix_approvals_state_created", "state", "created_at"),
         Index("ix_approvals_agent_created", "agent_id", text("created_at DESC")),
+        # One mirror row per runtime-side approval id (RPC route): a replayed
+        # gateway event must not open a second pending request for one action.
+        UniqueConstraint("agent_id", "external_ref", name="uq_approvals_agent_id_external_ref"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, server_default=UUID_DEFAULT)
@@ -54,6 +58,16 @@ class Approval(Base):
     args_digest: Mapped[str] = mapped_column(String(64))  # sha256 hex, server-computed (§7.3)
     claimed_risk: Mapped[RiskLevel | None] = mapped_column(RISK_LEVEL)
     risk_level: Mapped[RiskLevel] = mapped_column(RISK_LEVEL)
+    # Why the server graded it this way — shown to the operator, and the
+    # audit record of what the classifier saw (§7.4).
+    risk_categories: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, server_default=text("'{}'::jsonb")
+    )
+    # How the request reached us: 'http' (§7.1 wrapper) or 'openclaw_rpc'
+    # (the gateway raised it and we decide over the WS).
+    source: Mapped[str] = mapped_column(Text, default="http", server_default="http")
+    # The runtime's own approval id, for resolving back over the RPC route.
+    external_ref: Mapped[str | None] = mapped_column(Text)
     objective_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("objectives.id", ondelete="RESTRICT")
     )
@@ -90,3 +104,51 @@ class ApprovalPolicy(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     created_by: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=text("now()"))
+
+
+class ServiceToken(Base):
+    """Agent-side credentials (§7.5 / §12 S5).
+
+    Hashed at rest and rotatable without redeploy. Scopes are limited to
+    `approvals:create` and `approvals:poll`; `approvals:decide` is not a
+    grantable scope for this credential class at all — C4 is enforced by
+    the token never being able to name it, not merely by omitting it.
+    """
+
+    __tablename__ = "service_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, server_default=UUID_DEFAULT)
+    name: Mapped[str] = mapped_column(Text)
+    # sha256 of the presented secret; the plaintext is shown once at creation.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    # Short non-secret prefix so the operator can tell tokens apart in the UI.
+    token_prefix: Mapped[str] = mapped_column(String(12))
+    scopes: Mapped[list[str]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    # Optional binding: a token issued for one agent cannot speak for another.
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(server_default=text("now()"))
+    created_by: Mapped[str] = mapped_column(Text)
+    last_used_at: Mapped[datetime.datetime | None]
+    revoked_at: Mapped[datetime.datetime | None]
+
+
+class SystemFlag(Base):
+    """Global operational flags — the kill switch lives here (§7.7).
+
+    Key/value rather than columns so Phase 5's quiet-hours and later
+    switches do not each need a migration. Every write is audited.
+    """
+
+    __tablename__ = "system_flags"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        server_default=text("now()"), onupdate=text("now()")
+    )
+    updated_by: Mapped[str] = mapped_column(Text, default="system", server_default="system")
+
+
+KILL_SWITCH_KEY = "kill_switch"

@@ -19,7 +19,12 @@ from mission_control.models import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers defaults to True, which would silently switch
+    # off every already-configured logger in the process — including
+    # `mission_control.security`. Harmless when alembic runs as its own
+    # systemd oneshot, but catastrophic (and invisible) if migrations are
+    # ever run in-process: security events would simply stop being emitted.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

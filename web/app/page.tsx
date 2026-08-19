@@ -8,6 +8,8 @@ import { useEffect, useState } from "react";
 import { ConnectionBanner, Muted, StatusPill } from "@/components/bits";
 import { EventRow } from "@/components/EventRow";
 import { useEventStream } from "@/lib/useEventStream";
+import { KillSwitchBanner } from "@/components/ApprovalBits";
+import type { Approval, KillSwitch } from "@/lib/approvals";
 import {
   getJSON,
   timeAgo,
@@ -21,20 +23,27 @@ export default function Home() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [agentInfo, setAgentInfo] = useState<AgentInfoMap>({});
   const [error, setError] = useState<string | null>(null);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [killSwitch, setKillSwitch] = useState<KillSwitch>({ engaged: false });
   const { events, state, lastSync } = useEventStream({});
 
   useEffect(() => {
     let cancelled = false;
     async function refresh() {
       try {
-        const [agentsBody, runsBody] = await Promise.all([
+        const [agentsBody, runsBody, approvalsBody] = await Promise.all([
           getJSON<{ agents: Agent[] }>("/v1/agents"),
           getJSON<{ runs: Run[]; agents: AgentInfoMap }>("/v1/runs?limit=8"),
+          getJSON<{ approvals: Approval[]; pending_count: number; kill_switch: KillSwitch }>(
+            "/v1/approvals?state=pending&limit=1"
+          ),
         ]);
         if (cancelled) return;
         setAgents(agentsBody.agents);
         setRuns(runsBody.runs);
         setAgentInfo(runsBody.agents);
+        setPendingCount(approvalsBody.pending_count);
+        setKillSwitch(approvalsBody.kill_switch);
         setError(null);
       } catch (exc) {
         if (!cancelled) setError(String(exc));
@@ -51,6 +60,33 @@ export default function Home() {
   return (
     <main className="flex flex-col gap-4">
       <ConnectionBanner state={state} lastSync={lastSync} />
+      <KillSwitchBanner engaged={killSwitch.engaged} />
+
+      {/* Above the fold, first thing (§13): what is waiting on a decision. */}
+      <Link
+        href="/approvals/"
+        className="card flex items-center gap-3 p-4"
+        style={{
+          borderColor: pendingCount > 0 ? "var(--mc-amber)" : "var(--mc-border)",
+        }}
+      >
+        <span
+          className="text-3xl font-semibold tabular-nums"
+          style={{ color: pendingCount > 0 ? "var(--mc-amber)" : "var(--mc-muted)" }}
+        >
+          {pendingCount}
+        </span>
+        <span className="text-sm">
+          {pendingCount === 1 ? "approval waiting" : "approvals waiting"}
+          <span className="block text-xs" style={{ color: "var(--mc-faint)" }}>
+            tap to review
+          </span>
+        </span>
+        <span className="ml-auto text-xl" style={{ color: "var(--mc-faint)" }}>
+          ›
+        </span>
+      </Link>
+
       {error ? (
         <div className="card p-3 text-sm" style={{ color: "var(--mc-red)" }}>
           {error}

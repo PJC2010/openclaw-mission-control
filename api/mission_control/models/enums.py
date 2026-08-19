@@ -79,6 +79,10 @@ class DecidedVia(enum.StrEnum):
     DASHBOARD = "dashboard"
     AUTO_POLICY = "auto_policy"
     TIMEOUT = "timeout"
+    # Phase 2: auto-denials that are neither an operator's "no" nor a
+    # missed TTL. Kept distinct so the queue can explain itself (§7.7/§7.8).
+    KILL_SWITCH = "kill_switch"
+    RATE_LIMIT = "rate_limit"
 
 
 class PolicyAction(enum.StrEnum):

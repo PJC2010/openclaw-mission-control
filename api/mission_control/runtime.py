@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import Any
 
 from .adapters import AgentAdapter
 from .adapters.hermes import HermesAdapter
@@ -17,9 +18,12 @@ log = logging.getLogger("mission_control.runtime")
 
 
 class AdapterSupervisor:
-    def __init__(self, settings: Settings, normalizer: Normalizer) -> None:
+    def __init__(
+        self, settings: Settings, normalizer: Normalizer, approvals: Any | None = None
+    ) -> None:
         self._settings = settings
         self._normalizer = normalizer
+        self._approvals = approvals
         self.adapters: dict[uuid.UUID, AgentAdapter] = {}
 
     async def start(self) -> None:

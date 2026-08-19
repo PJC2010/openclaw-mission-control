@@ -156,3 +156,36 @@ def serve_headers(
 async def operator_client() -> AsyncIterator[httpx.AsyncClient]:
     async with client_for(build_app()) as client:
         yield client
+
+
+@pytest.fixture
+def security_events():
+    """Collect `mission_control.security` records directly.
+
+    A dedicated handler rather than `caplog`: security logging is a hard
+    requirement (§17 tests 5/8), so the assertion should not depend on
+    pytest's root-propagation behaviour.
+    """
+    import logging
+
+    records: list[logging.LogRecord] = []
+
+    class Collector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger("mission_control.security")
+    handler = Collector(level=logging.DEBUG)
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+
+def security_text(records) -> str:
+    # getMessage() already interpolates record.args — do not format twice.
+    return "\n".join(record.getMessage() for record in records)

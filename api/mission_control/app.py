@@ -15,8 +15,9 @@ from .auth.identity import OperatorIdentityMiddleware
 from .auth.tailscale import CliWhoisResolver, TtlCachingResolver, WhoisResolver
 from .config import Settings
 from .db import build_async_engine, build_async_session_factory
+from .approvals import ApprovalService
 from .normalizer import Normalizer
-from .routes import agents, health, home, runs, stream, system
+from .routes import agents, approvals, health, home, runs, stream, system
 from .runtime import AdapterSupervisor
 
 log = logging.getLogger("mission_control.app")
@@ -60,12 +61,17 @@ def create_app(
     engine = build_async_engine(settings)
     db_sessions = build_async_session_factory(engine)
     normalizer = Normalizer(db_sessions)
+    approval_service = ApprovalService(db_sessions, settings, normalizer=normalizer)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         supervisor: AdapterSupervisor | None = None
+        # The TTL sweeper runs whenever the app runs: an approval that
+        # nobody answers must expire (and therefore deny) even if every
+        # adapter is disabled (§7.2).
+        await approval_service.start()
         if settings.adapters_enabled:
-            supervisor = AdapterSupervisor(settings, normalizer)
+            supervisor = AdapterSupervisor(settings, normalizer, approvals=approval_service)
             app.state.supervisor = supervisor
             await supervisor.start()
         try:
@@ -73,6 +79,7 @@ def create_app(
         finally:
             if supervisor is not None:
                 await supervisor.stop()
+            await approval_service.stop()
             await engine.dispose()
 
     app = FastAPI(
@@ -92,12 +99,14 @@ def create_app(
     app.state.db_engine = engine
     app.state.db_sessions = db_sessions
     app.state.normalizer = normalizer
+    app.state.approvals = approval_service
 
     app.include_router(health.router)
     app.include_router(agents.router)
     app.include_router(runs.router)
     app.include_router(stream.router)
     app.include_router(system.router)
+    app.include_router(approvals.router)
     app.include_router(home.router)  # /v1/whoami
 
     if WEB_BUILD_DIR.is_dir():
