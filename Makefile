@@ -4,7 +4,7 @@
 VENV := api/.venv
 PY   := $(VENV)/bin/python
 
-.PHONY: setup test db-up db-down migrate migration-head revision dev web-build verify-phase0 verify-phase2
+.PHONY: setup test db-up db-down migrate migration-head revision dev web-build preflight install verify-phase0 verify-phase2
 
 setup:
 	python3.12 -m venv $(VENV)
@@ -35,6 +35,12 @@ dev:
 
 web-build:
 	cd web && npm ci && npm run build
+
+preflight:
+	./scripts/preflight.sh
+
+install:
+	sudo ./scripts/install.sh
 
 verify-phase0:
 	./scripts/verify-phase0.sh

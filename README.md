@@ -48,7 +48,11 @@ docs/
   phase-2-runbook.md    tokens, arming both runtimes' gates, §17 verification
   roadmap.md            plan to completion (phases 3-6) and what it needs from you
   decisions.md          verification findings, deviations, open questions
-scripts/verify-phase0.sh  local end-to-end verification
+scripts/
+  preflight.sh          pre-install check: prerequisites + is the gate armed
+  install.sh            idempotent installer (--dry-run supported)
+  verify-phase0.sh      Phase 0 checklist
+  verify-phase2.sh      approval flow end to end over real HTTP
 ```
 
 ## Architecture in one line
@@ -68,8 +72,17 @@ cd web && npm ci && npm test && npm run build   # §17 #10 + the static export
 make verify-phase0          # the Phase 0 checklist, locally
 ```
 
-Deployment is `docs/phase-0-runbook.md` → `phase-1` → `phase-2`, in order.
-`docs/roadmap.md` is the plan for what remains.
+## Deploying
+
+```bash
+./scripts/preflight.sh          # changes nothing; says whether the gate will actually gate
+sudo ./scripts/install.sh --dry-run --hermes-home /home/pete/.hermes
+sudo ./scripts/install.sh --hermes-home /home/pete/.hermes
+```
+
+`docs/DEPLOY.md` is the one page to follow, including the four steps only
+you can do. The per-phase runbooks remain as reference for what each step
+is doing. `docs/roadmap.md` is the plan for what remains.
 
 Production install is `docs/phase-0-runbook.md` — systemd units, tailscale
 serve, ACL, and the tailnet-side verification (§16 Phase 0 acceptance).
