@@ -44,6 +44,31 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    # ── Phase 1: adapters (§6) ───────────────────────────────────────────
+    # Master switch; tests build the app with adapters off.
+    adapters_enabled: bool = True
+
+    # OpenClaw gateway (§6.1). Empty URL disables the adapter.
+    openclaw_url: str = "ws://127.0.0.1:18789"
+    openclaw_token: str = ""  # gateway token (gateway.auth.mode: token)
+    openclaw_display_name: str = "OpenClaw"
+    # audit.activity.list poll over the WS; live broadcasts arrive push-side.
+    openclaw_poll_interval_s: float = 3.0
+    openclaw_rpc_timeout_s: float = 10.0
+
+    # Hermes Agent (§6.2). Empty home disables the adapter.
+    hermes_home: str = ""  # e.g. /home/pete/.hermes
+    hermes_display_name: str = "Hermes"
+    hermes_poll_interval_s: float = 5.0  # spec default
+    # Fail-loud guard: refuse to ingest if state.db schema_version differs
+    # (§6.2 'MUST NOT silently ingest garbage'). Bump deliberately after
+    # reviewing upstream schema changes.
+    hermes_expected_schema_version: int = 26
+
+    # Bounded event payload text (observability copies, not approval args —
+    # S7's no-truncation rule applies to approvals.tool_args, stored fully).
+    event_payload_text_limit: int = 16384
+
     @field_validator("bind_host")
     @classmethod
     def _require_loopback(cls, value: str) -> str:

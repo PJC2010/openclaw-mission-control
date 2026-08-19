@@ -4,7 +4,7 @@
 VENV := api/.venv
 PY   := $(VENV)/bin/python
 
-.PHONY: setup test db-up db-down migrate migration-head revision dev verify-phase0
+.PHONY: setup test db-up db-down migrate migration-head revision dev web-build verify-phase0
 
 setup:
 	python3.12 -m venv $(VENV)
@@ -32,6 +32,9 @@ revision:
 # that is the security model working, not a bug. /health answers.
 dev:
 	cd api && set -a && . ../.env && set +a && $(abspath $(PY)) -m mission_control
+
+web-build:
+	cd web && npm ci && npm run build
 
 verify-phase0:
 	./scripts/verify-phase0.sh

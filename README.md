@@ -14,7 +14,7 @@ are non-negotiable.
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Foundation: scaffold, Postgres 16 + Alembic baseline (§5), loopback API, §11.3 identity middleware, systemd, tailscale serve | ✅ done |
-| 1 | Observation (adapters, normalizer, SSE) | — |
+| 1 | Observation: OpenClaw + Hermes adapters, normalizer, runs/events, agent liveness, SSE live tail, run list/detail UI | ✅ done |
 | 2 | Approvals gateway | — |
 | 3 | Objectives & alignment | — |
 | 4 | Agenda | — |
@@ -27,15 +27,20 @@ are non-negotiable.
 api/                    FastAPI app (Python 3.12) + SQLAlchemy models + Alembic
   mission_control/
     auth/               operator identity path (§11.3); agent tokens land in Phase 2
-    models/             every table in spec §5
-  alembic/versions/     0001 = full baseline
-  tests/                pytest + httpx (includes §17 acceptance tests 6 & 7)
+    models/             every table in spec §5 (+ adapter_cursors)
+    adapters/           §6: openclaw (WS, audit ledger), hermes (read-only files)
+    normalizer/         §6.3: the only writer of runs/events; dedupe, seq, broadcast
+    routes/             health, agents, runs, SSE stream, system health, whoami
+  alembic/versions/     0001 baseline · 0002 adapter cursors
+  tests/                pytest + httpx; fake OpenClaw gateway; on-disk Hermes fixture
+web/                    Next.js static export (dark, phone-first) served by the API
 deploy/
   postgres/initdb/      first-boot role split (mc_migrate / mc_app / mc_readonly)
   systemd/              db, migrate, api units
   tailscale/            serve setup script + ACL snippet (§11.3 layer 2)
 docs/
   phase-0-runbook.md    VPS install + verification steps
+  phase-1-runbook.md    adapter config, web build, §16 P1 acceptance checks
   decisions.md          verification findings, deviations, open questions
 scripts/verify-phase0.sh  local end-to-end verification
 ```

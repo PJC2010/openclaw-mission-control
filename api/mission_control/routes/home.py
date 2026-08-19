@@ -13,11 +13,13 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse
 
 router = APIRouter()
+# Registered only when web/out is absent — the static export owns "/" once built.
+hello_router = APIRouter()
 
 _INDEX = Path(__file__).resolve().parent.parent / "static" / "index.html"
 
 
-@router.get("/", include_in_schema=False)
+@hello_router.get("/", include_in_schema=False)
 async def index() -> FileResponse:
     return FileResponse(_INDEX, media_type="text/html")
 

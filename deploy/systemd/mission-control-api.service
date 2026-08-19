@@ -27,6 +27,10 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
+# Phase 1 — Hermes adapter: ProtectHome hides /home, so bind the Hermes state
+# back in READ-ONLY (which also enforces §6.2's never-write rule at the OS
+# level). Match the path to MC_HERMES_HOME; '-' tolerates its absence.
+BindReadOnlyPaths=-/home/pete/.hermes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

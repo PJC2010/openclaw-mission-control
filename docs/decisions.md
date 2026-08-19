@@ -1,4 +1,4 @@
-# Decisions, verification findings, and deviations — Phase 0
+# Decisions, verification findings, and deviations
 
 Per spec §0/§19: version-specific details were verified against current
 documentation and source before building; discrepancies are reported here,
@@ -140,6 +140,52 @@ writing adapter code.
 - **D8 — uvicorn runs with `proxy_headers=False`** (explicitly): the
   middleware parses `X-Forwarded-For` itself; uvicorn must not rewrite the
   peer address from headers, or layer 1 would trust attacker input.
+
+## P1. Phase 1 decisions (observation)
+
+- **P1-D1 — Adapters emit; the normalizer assigns `events.seq`.** §6.3's
+  contract includes `seq`; adapters pass the runtime's ordering hint
+  (`source_seq`: audit-ledger sequence, SQLite rowid) but the stored,
+  SSE-resume-bearing `events.seq` is assigned per agent by the normalizer.
+  Runtime sequences reset across reconnects and interleave across source
+  streams (Hermes has three), so a single writer must own the cursor space.
+- **P1-D2 — OpenClaw observation is metadata-only in Phase 1.** Ingestion
+  rides `audit.activity.list` (stable eventIds, monotonic sequence, 30-day
+  retention): runs, tool actions, message dispatch metadata — but the
+  ledger deliberately stores no prompts/tool args/bodies, and the push-side
+  `chat` delta stream has no stable per-frame identity to dedupe on.
+  Message *content* for OpenClaw comes later via `chat.history` on the run
+  detail view if wanted; the approval path (Phase 2) carries its own
+  complete `tool_args` regardless (S7). Hermes observation includes bounded
+  message/tool content from state.db.
+- **P1-D3 — event payload text is clipped at MC_EVENT_PAYLOAD_TEXT_LIMIT
+  (16 KB default) with an explicit `truncated: true` + full-content sha256.**
+  Observability copies, not records of authority; S7's no-truncation rule
+  binds `approvals.tool_args` (Phase 2), which will be stored complete.
+- **P1-D4 — migration 0002 adds `adapter_cursors`** (agent_id, source →
+  jsonb cursor): §6.2's per-table high-water marks and §6.1's reconnect
+  backfill need durable cursors that survive process restarts; deriving
+  them from the events table would couple correctness to payload parsing.
+- **P1-D5 — vanished Hermes cron jobs are disabled, not deleted** — history
+  and future objective links survive; Phase 4 owns richer agenda semantics.
+- **P1-D6 — subagent linkage** (§6.1): OpenClaw child runs link to the most
+  recent run in the spawning session (`sessions.list` `spawnedBy`/
+  `parentSessionKey` lineage + last-run tracking); Hermes uses
+  `parent_session_id` directly. The OpenClaw mapping is best-effort and
+  marked for refinement against real gateway traffic (tasks.list
+  `parentTaskId` is the upgrade path if needed).
+- **P1-D7 — agent liveness**: OpenClaw = WS connected + `tick`/`heartbeat`
+  (throttled to one status write per 10s); Hermes = freshest mtime of
+  cron/ticker_heartbeat, state.db, state.db-wal, threshold 180s. Status
+  *transitions* are recorded as lifecycle events; steady heartbeats only
+  update `agents.last_heartbeat_at`.
+- **P1-D8 — SSE ids are the global `events.id`** (per-stream resume via
+  `Last-Event-ID`); per-agent `events.seq` remains the per-agent cursor
+  §13 names. A global stream cannot resume on a per-agent counter, and
+  `events.id` is monotonic per the single-writer ingest path.
+- **P1-D9 — the Hermes state path is bound read-only into the API's mount
+  namespace** (`BindReadOnlyPaths`), so §6.2's MUST-NOT-write holds at the
+  OS level too, not just by code discipline.
 
 ## C. §18 open questions — status
 
