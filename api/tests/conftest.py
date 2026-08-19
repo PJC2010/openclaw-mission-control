@@ -120,6 +120,22 @@ async def hermes_agent_id(normalizer) -> uuid.UUID:
     return await normalizer.register_agent(AgentRuntime.HERMES, "hermes:test", "Hermes Test")
 
 
+def root_peer(peer_ip: str, peer_port: int, local_ip: str, local_port: int):
+    """Tests drive the app in-process, so there is no real socket to look
+    up. Stand in for the kernel: the connection came from root, i.e. from
+    `tailscale serve`."""
+    from mission_control.auth.peer import PeerCredentials
+
+    return PeerCredentials(uid=0, source="test")
+
+
+def agent_peer(peer_ip: str, peer_port: int, local_ip: str, local_port: int):
+    """A local agent process — the C4 attacker."""
+    from mission_control.auth.peer import PeerCredentials
+
+    return PeerCredentials(uid=1000, source="test")
+
+
 async def ok_resolver(source_ip: str) -> WhoisIdentity | None:
     """Happy-path fake tailscaled: the tailnet IP belongs to the operator."""
     if source_ip == TAILNET_IP:
@@ -127,8 +143,12 @@ async def ok_resolver(source_ip: str) -> WhoisIdentity | None:
     return None
 
 
-def build_app(resolver=ok_resolver, **settings_overrides):
-    return create_app(settings=make_settings(**settings_overrides), whois_resolver=resolver)
+def build_app(resolver=ok_resolver, peer_resolver=root_peer, **settings_overrides):
+    return create_app(
+        settings=make_settings(**settings_overrides),
+        whois_resolver=resolver,
+        peer_resolver=peer_resolver,
+    )
 
 
 def client_for(app, peer_ip: str = "127.0.0.1") -> httpx.AsyncClient:

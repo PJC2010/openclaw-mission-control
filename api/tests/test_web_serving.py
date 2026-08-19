@@ -7,7 +7,7 @@ import pytest
 
 from mission_control.app import WEB_BUILD_DIR, create_app
 
-from .conftest import make_settings, ok_resolver, serve_headers, client_for
+from .conftest import make_settings, ok_resolver, root_peer, serve_headers, client_for
 
 pytestmark = pytest.mark.anyio
 
@@ -18,7 +18,7 @@ needs_build = pytest.mark.skipif(
 
 @needs_build
 async def test_web_index_served_behind_identity():
-    app = create_app(settings=make_settings(), whois_resolver=ok_resolver)
+    app = create_app(settings=make_settings(), whois_resolver=ok_resolver, peer_resolver=root_peer)
     async with client_for(app) as client:
         anonymous = await client.get("/")
         assert anonymous.status_code == 401  # identity still required

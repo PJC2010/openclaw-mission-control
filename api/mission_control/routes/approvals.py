@@ -130,15 +130,26 @@ async def create_approval(
             },
         ) from conflict
 
-    return {
+    body: dict[str, Any] = {
         "approval_id": str(snapshot.id),
         "state": snapshot.state.value,
-        "allowed": snapshot.allowed,
+        "allowed": False,
         "risk_level": snapshot.risk_level.value,
         "expires_at": snapshot.expires_at.isoformat(),
         "created": created,
         "poll_url": f"/v1/approvals/{snapshot.id}/decision",
     }
+    if snapshot.state is not ApprovalState.PENDING:
+        # There is exactly ONE path to `allowed: true`, and it is the
+        # atomic claim — which also re-checks the kill switch and returns
+        # args_digest. Deriving permission here from the snapshot's state
+        # would hand out a grant without consuming it (§7.6).
+        outcome = await service.claim_decision(snapshot.id)
+        body["state"] = outcome.state.value
+        body["allowed"] = outcome.allowed
+        body["already_consumed"] = outcome.already_consumed
+        body["args_digest"] = outcome.args_digest
+    return body
 
 
 @router.get("/v1/approvals/{approval_id}/decision")

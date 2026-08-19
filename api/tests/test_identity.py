@@ -203,3 +203,94 @@ async def test_health_from_non_loopback_peer_still_served():
     async with client_for(build_app(), peer_ip="10.0.0.5") as client:
         response = await client.get("/health")
     assert response.status_code == 200
+
+
+# ── C4: a local process must not be able to forge operator identity ──────
+#
+# This is the attack an adversarial review found, and it is the one that
+# matters most: the agent runtimes run on this same host, so "the peer is
+# loopback and the Serve headers are present" proves nothing. Serve injects
+# no secret, so a compromised agent can set every header itself — including
+# pointing X-Forwarded-For at the operator's own tailnet address, which
+# makes `tailscale whois` agree. Without a check the kernel backs, the
+# agent authenticates as the operator and approves its own requests.
+
+
+async def test_local_process_cannot_forge_operator_identity():
+    """The full forgery: correct headers, a real operator login, an
+    X-Forwarded-For that whois genuinely resolves to that operator — and
+    still refused, because the socket was opened by an agent, not by
+    tailscale serve."""
+    from .conftest import agent_peer
+
+    app = build_app(peer_resolver=agent_peer)
+    async with client_for(app) as client:
+        response = await client.get("/v1/whoami", headers=serve_headers())
+    assert response.status_code == 403
+
+
+async def test_forged_identity_cannot_decide_an_approval():
+    """The same attack aimed at the thing that actually matters (C4)."""
+    from .conftest import agent_peer
+
+    app = build_app(peer_resolver=agent_peer)
+    async with client_for(app) as client:
+        response = await client.post(
+            "/v1/approvals/00000000-0000-0000-0000-000000000001/decision",
+            headers=serve_headers(),
+            json={"approve": True},
+        )
+    # Rejected at the middleware, before the route or the service is reached.
+    assert response.status_code == 403
+
+
+async def test_unresolvable_peer_is_refused_by_default():
+    """If the kernel cannot tell us who opened the socket, we do not guess."""
+    def unknown_peer(*_args):
+        return None
+
+    app = build_app(peer_resolver=unknown_peer)
+    async with client_for(app) as client:
+        response = await client.get("/v1/whoami", headers=serve_headers())
+    assert response.status_code == 403
+
+
+async def test_peer_check_can_be_relaxed_only_deliberately():
+    """`require_peer_uid=false` is an explicit, documented choice for hosts
+    where no untrusted local code runs — never a silent default."""
+    def unknown_peer(*_args):
+        return None
+
+    app = build_app(peer_resolver=unknown_peer, require_peer_uid=False)
+    async with client_for(app) as client:
+        response = await client.get("/v1/whoami", headers=serve_headers())
+    assert response.status_code == 200
+
+
+async def test_additional_operator_uid_can_be_permitted():
+    """Serve does not have to run as root on every host."""
+    from mission_control.auth.peer import PeerCredentials
+
+    def serve_as_uid_115(*_args):
+        return PeerCredentials(uid=115, source="test")
+
+    app = build_app(peer_resolver=serve_as_uid_115, operator_peer_uids="0,115")
+    async with client_for(app) as client:
+        response = await client.get("/v1/whoami", headers=serve_headers())
+    assert response.status_code == 200
+
+
+async def test_agent_routes_stay_reachable_from_an_agent_peer():
+    """The peer check guards the OPERATOR surface only — agents must still
+    be able to create and poll their own approvals from the same host."""
+    from .conftest import agent_peer
+
+    app = build_app(peer_resolver=agent_peer)
+    async with client_for(app) as client:
+        response = await client.post(
+            "/v1/approvals",
+            json={"idempotency_key": "x" * 12, "tool_name": "t", "tool_args": {}},
+        )
+    # 401 for the missing service token, NOT 403 for the peer — proof the
+    # agent path is not collateral damage of the identity fix.
+    assert response.status_code == 401

@@ -257,13 +257,37 @@ async def test_delivery_without_connection_is_recorded_not_lost(bridge):
     assert [s.id for s in await service.undelivered()] == [snapshot.id]
 
 
-async def test_already_resolved_record_counts_as_delivered(bridge):
-    """`approval.get` resolves pending records only, so a missing record
-    means the gateway already reached a terminal state."""
+async def test_positive_not_found_counts_as_delivered(bridge):
+    """`approval.get` resolves pending records only, so a gateway that
+    positively reports the record absent has already gone terminal."""
+    from mission_control.adapters.openclaw.client import GatewayError
+
     obj, service, agent_id = bridge
     snapshot = await make_pending(obj, service, agent_id, external_ref="gw-8")
-    obj._client.responses["approval.get"] = KeyError("not found")  # noqa: SLF001
+    obj._client.responses["approval.get"] = GatewayError(  # noqa: SLF001
+        {"code": "NOT_FOUND", "message": "no such approval"}, "approval.get"
+    )
     await service.decide(snapshot.id, approve=False, operator_login="pete@example.com")
+    assert await service.undelivered() == []
+
+
+async def test_unreadable_record_keeps_the_verdict_owed(bridge):
+    """"I could not read it" must never be mistaken for "already resolved".
+
+    Treating a transient RPC failure as delivered silently discards the
+    operator's decision and leaves the gateway to its own askFallback.
+    """
+    obj, service, agent_id = bridge
+    snapshot = await make_pending(obj, service, agent_id, external_ref="gw-8b")
+    obj._client.responses["approval.get"] = ConnectionError("socket reset")  # noqa: SLF001
+    await service.decide(snapshot.id, approve=False, operator_login="pete@example.com")
+    assert [s.id for s in await service.undelivered()] == [snapshot.id]
+
+    # And once the gateway is readable again, the retry delivers it.
+    obj._client.responses["approval.get"] = {  # noqa: SLF001
+        "presentation": {"kind": "exec", "allowedDecisions": ["allow-once", "deny"]}
+    }
+    assert await obj.retry_undelivered() == 1
     assert await service.undelivered() == []
 
 

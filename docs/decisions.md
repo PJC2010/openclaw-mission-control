@@ -306,6 +306,48 @@ openclaw exec-policy set --ask-fallback deny
 - **`approvals:decide` is not a mintable scope.** C4 holds structurally
   rather than by remembering to check a list.
 
+### P2-G. The identity hole found in adversarial review (fixed)
+
+The original §11.3 layer 1 asked only whether the peer address was
+loopback, and treated the presence of Serve's `X-Forwarded-*` headers as
+proof the request came through Serve. On this host that proves nothing.
+
+**The attack.** Both agent runtimes execute on the same VPS. A compromised
+agent opens a plain loopback connection to the API and sets the headers
+itself: `Tailscale-User-Login: <operator>`, plus `X-Forwarded-For` pointed
+at the operator's *real* tailnet address. Layer 3 then resolves that
+address through `tailscale whois`, gets the operator's login, and finds it
+matches the claim. The agent is authenticated as the operator and can
+approve its own requests — a complete break of C4, reached without any
+credential at all.
+
+Serve injects no secret, so **no header can distinguish its traffic from a
+local forgery**. The spec anticipates this in §11.4 ("tokenless header auth
+assumes the host is trusted, so if untrusted local code may run on the VPS,
+require token auth instead") and §12's threat model states plainly that
+untrusted local code is what runs here.
+
+**The fix** asks the kernel something headers cannot express: which UID
+owns the socket at the other end. `tailscale serve` proxies as root; the
+agent runtimes do not. `/proc/net/tcp` carries that UID per connection and
+an unprivileged process cannot falsify its own entry. The check runs before
+any header is believed, is configurable (`MC_OPERATOR_PEER_UIDS`, default
+root only), and fails closed when the UID cannot be determined.
+
+**The deployment constraint this creates** — and it is a real one:
+
+> The agent runtimes MUST NOT run as a UID in `MC_OPERATOR_PEER_UIDS`.
+> Running an agent as root re-opens the hole completely.
+
+Only the operator surface is gated this way; the agent protocol endpoints
+stay reachable from an agent's own UID, which is what they are for.
+
+Residual risk, stated rather than hidden: an attacker who achieves code
+execution *as root* on the VPS defeats this, as they defeat everything
+else. A further hardening step, not taken now, is an operator token
+distributed out of band (§11.4's literal suggestion), which would also
+cover the root case at the cost of an unlock step per device.
+
 ### P2-F. Carried debt (not shipped in Phase 2, tracked in the roadmap)
 
 - Restart divergence: if a runtime restarts, its records may go terminal

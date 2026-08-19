@@ -32,6 +32,10 @@ CATEGORY_SELF_MODIFICATION = "self_modification"
 CATEGORY_PRIVILEGE = "privilege"
 CATEGORY_WORKSPACE_ESCAPE = "workspace_escape"
 
+MAX_WALK_DEPTH = 24
+# Emitted when the argument structure cannot be fully inspected.
+UNINSPECTABLE = "\x00mc-uninspectable\x00"
+
 CRITICAL_CATEGORIES = frozenset(
     {
         CATEGORY_CREDENTIALS,
@@ -86,7 +90,11 @@ def _walk_strings(value: Any, depth: int = 0) -> Iterable[str]:
     Keys matter: {"aws_secret_access_key": "..."} is a credential handling
     call even when the value is opaque.
     """
-    if depth > 12:  # cycle/pathological-nesting guard
+    if depth > MAX_WALK_DEPTH:
+        # Failing quietly here would make deeply nested arguments invisible
+        # to every rule. Emit a marker instead; classify() treats it as
+        # uninspectable, and uninspectable means critical.
+        yield UNINSPECTABLE
         return
     if isinstance(value, str):
         yield value
@@ -152,7 +160,7 @@ RULES: tuple[Rule, ...] = (
     _rule(CATEGORY_EXTERNAL_COMMS, r"\bgit\s+push\b", "publishes code to a remote"),
 
     # "destructive filesystem operations"
-    _rule(CATEGORY_DESTRUCTIVE_FS, r"\brm\s+(-[a-z]*\s+)*-[a-z]*[rf]", "recursive/forced delete"),
+    _rule(CATEGORY_DESTRUCTIVE_FS, r"\brm\b[^\n;|&]*?(?:--recursive|--force|--no-preserve-root|\s-[a-z]*[rf])", "recursive/forced delete"),
     _rule(CATEGORY_DESTRUCTIVE_FS, r"\b(shred|wipefs|mkfs(\.[a-z0-9]+)?|fdisk|parted|diskutil\s+erase)\b", "destroys a filesystem/disk"),
     _rule(CATEGORY_DESTRUCTIVE_FS, r"\bdd\s+.*\bof=/dev/", "raw writes to a block device"),
     _rule(CATEGORY_DESTRUCTIVE_FS, r">\s*/dev/(sd|nvme|disk|hd)", "redirects onto a block device"),
@@ -160,15 +168,15 @@ RULES: tuple[Rule, ...] = (
     _rule(CATEGORY_DESTRUCTIVE_FS, r"\bgit\s+(reset\s+--hard|clean\s+-[a-z]*f|push\s+(--force|-f)\b)", "destroys git history/worktree"),
     _rule(CATEGORY_DESTRUCTIVE_FS, r"\bdrop\s+(table|database|schema)\b", "drops a database object"),
     _rule(CATEGORY_DESTRUCTIVE_FS, r"\btruncate\s+table\b", "truncates a table"),
-    _rule(CATEGORY_DESTRUCTIVE_FS, r"\bdelete\s+from\b(?!.*\bwhere\b)", "unbounded SQL delete"),
+    _rule(CATEGORY_DESTRUCTIVE_FS, r"\bdelete\s+from\b[^;\n]*?(?:;|\n|$)(?<!where )", "SQL delete"),
     _rule(CATEGORY_DESTRUCTIVE_FS, r"\bchmod\s+(-[a-z]*r[a-z]*\s+)?(777|a\+rwx)", "world-writable permissions"),
     _rule(CATEGORY_DESTRUCTIVE_FS, r"\b(chown|chmod)\s+-[a-z]*r[a-z]*\s+", "recursive ownership/permission change"),
 
     # "package installation, or modification of the agent's own skills, config, or memory"
-    _rule(CATEGORY_SELF_MODIFICATION, r"\b(pip3?|uv)\s+(pip\s+)?(install|add)\b", "installs a Python package"),
-    _rule(CATEGORY_SELF_MODIFICATION, r"\b(npm|pnpm|yarn|bun)\s+(i|install|add|link)\b", "installs a JS package"),
-    _rule(CATEGORY_SELF_MODIFICATION, r"\b(apt|apt-get|dnf|yum|pacman|apk|brew|port)\s+(install|add|-s\s+install)\b", "installs a system package"),
-    _rule(CATEGORY_SELF_MODIFICATION, r"\b(cargo|gem|go|composer|nuget)\s+install\b", "installs a package"),
+    _rule(CATEGORY_SELF_MODIFICATION, r"\b(pip3?|uv)\s+(?:-{1,2}[^\s]+\s+)*(pip\s+)?(install|add)\b", "installs a Python package"),
+    _rule(CATEGORY_SELF_MODIFICATION, r"\b(npm|pnpm|yarn|bun)\s+(?:-{1,2}[^\s]+\s+)*(i|install|add|link)\b", "installs a JS package"),
+    _rule(CATEGORY_SELF_MODIFICATION, r"\b(apt|apt-get|dnf|yum|pacman|apk|brew|port)\s+(?:-{1,2}[^\s]+\s+)*(install|add)\b", "installs a system package"),
+    _rule(CATEGORY_SELF_MODIFICATION, r"\b(cargo|gem|go|composer|nuget)\s+(?:-{1,2}[^\s]+\s+)*install\b", "installs a package"),
     _rule(CATEGORY_SELF_MODIFICATION, r"\bcurl\b[^|]*\|\s*(sudo\s+)?(ba|z|k)?sh\b", "pipes a remote script into a shell"),
     _rule(CATEGORY_SELF_MODIFICATION, r"\bwget\b[^|]*\|\s*(sudo\s+)?(ba|z|k)?sh\b", "pipes a remote script into a shell"),
     _rule(CATEGORY_SELF_MODIFICATION, r"(\.hermes/|\.openclaw/|/\.claude/|openclaw\.json|cli-config\.ya?ml)", "modifies agent configuration"),
@@ -273,6 +281,13 @@ def classify(
             never_auto_approvable=True,
         )
 
+    if UNINSPECTABLE in raw_parts:
+        return RiskAssessment(
+            level=RiskLevel.CRITICAL,
+            categories=[CATEGORY_WORKSPACE_ESCAPE],
+            reasons=["arguments nest too deeply to inspect fully"],
+            never_auto_approvable=True,
+        )
     corpus = normalize("\n".join(part for part in raw_parts if part))
     normalized_tool = tokenize_name(tool_name)
 
@@ -309,11 +324,9 @@ def classify(
     # No critical category. Grade the remainder conservatively.
     if EXEC_TOOL_PATTERN.search(normalized_tool):
         return RiskAssessment(RiskLevel.HIGH, [], ["executes commands or code"])
-    if not known_tool:
-        # §7.6: the default for an unknown tool is gated.
-        return RiskAssessment(RiskLevel.HIGH, [], ["unrecognized tool — gated by default"])
     if WRITE_TOOL_PATTERN.search(normalized_tool):
         return RiskAssessment(RiskLevel.MEDIUM, [], ["modifies state"])
     if READ_TOOL_PATTERN.search(normalized_tool):
         return RiskAssessment(RiskLevel.LOW, [], ["read-only operation"])
-    return RiskAssessment(RiskLevel.MEDIUM, [], ["unclassified operation"])
+    # §7.6: a tool whose name we cannot even categorise is gated by default.
+    return RiskAssessment(RiskLevel.HIGH, [], ["unrecognized tool — gated by default"])

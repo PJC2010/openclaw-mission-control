@@ -42,6 +42,31 @@ class Settings(BaseSettings):
     # Optional pin of the Serve-fronted MagicDNS name (X-Forwarded-Host). Empty = not checked.
     expected_forwarded_host: str = ""
 
+    # §11.3 layer 1 (strengthened) — which local UIDs may present operator
+    # identity. `tailscale serve` proxies as root, so the default is root
+    # only. Anything else on this host — above all the agent runtimes —
+    # can open a loopback socket and forge the Serve headers, because Serve
+    # injects no secret that would distinguish its traffic.
+    # Widen ONLY if serve runs as a non-root user; never to include a UID
+    # an agent runs as.
+    operator_peer_uids: str = "0"
+    # If the peer UID cannot be determined (no /proc, unusual platform),
+    # reject. Set false only on a host where no untrusted local code runs,
+    # and understand that it re-opens agent self-approval (C4).
+    require_peer_uid: bool = True
+
+    @property
+    def operator_uid_set(self) -> set[int]:
+        uids: set[int] = set()
+        for part in self.operator_peer_uids.split(","):
+            part = part.strip()
+            if part:
+                try:
+                    uids.add(int(part))
+                except ValueError:
+                    continue
+        return uids
+
     log_level: str = "INFO"
 
     # ── Phase 1: adapters (§6) ───────────────────────────────────────────

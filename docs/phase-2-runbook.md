@@ -27,6 +27,23 @@ proven contained, so every path write asks.
 MC_WORKSPACE_ALLOWLIST=/home/pete/work,/opt/agent-workspace
 ```
 
+## 2b. Confirm the agents do not run as root
+
+Operator identity is verified against the UID that opened the socket
+(§P2-G): `tailscale serve` proxies as root, so root is the only UID
+permitted to present operator identity. If an agent runtime also runs as
+root, it can forge operator identity and approve its own requests.
+
+```bash
+systemctl show -p User openclaw-gateway hermes 2>/dev/null   # adjust unit names
+ps -o user= -p "$(pgrep -f openclaw | head -1)"
+ps -o user= -p "$(pgrep -f hermes | head -1)"
+```
+
+Neither should be `root`. If one is, give it its own unprivileged user
+before arming the gate — this is not a hardening nicety, it is the control
+that keeps an agent from approving itself.
+
 ## 3. Mint service tokens (one per agent)
 
 Agents must already be registered, which happens automatically the first

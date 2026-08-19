@@ -25,7 +25,7 @@ from mission_control.auth.service_token import (
 from mission_control.models import Agent, Approval, AuditLog, ServiceToken
 from mission_control.models.enums import AgentRuntime, ApprovalState, DecidedVia, RiskLevel
 
-from .conftest import make_settings, ok_resolver, security_text, serve_headers, OPERATOR_LOGIN
+from .conftest import make_settings, ok_resolver, root_peer, security_text, serve_headers, OPERATOR_LOGIN
 
 pytestmark = pytest.mark.anyio
 
@@ -39,7 +39,7 @@ async def app(test_db_url):
 
     application = create_app(
         settings=make_settings(database_url=test_db_url, workspace_allowlist="/workspace"),
-        whois_resolver=ok_resolver,
+        whois_resolver=ok_resolver, peer_resolver=root_peer,
     )
     async with application.state.db_engine.begin() as conn:
         await conn.execute(
@@ -618,3 +618,74 @@ async def test_http_sourced_approvals_need_no_delivery(app, token):
     async with app.state.db_sessions() as session:
         row = await session.get(Approval, uuid.UUID(approval_id))
     assert row.resolution_state == "not_required"
+
+
+# ── the replay path is not a second way to be told yes ───────────────────
+
+
+async def test_replayed_create_cannot_outlive_the_kill_switch(app, token):
+    """An agent must not be able to wait out "Pause All Agents" by
+    re-POSTing the key of an approval it already got approved."""
+    async with client(app) as http:
+        created = await create_request(http, token, key="key-replay-kill-001")
+        approval_id = created.json()["approval_id"]
+        await http.post(
+            f"/v1/approvals/{approval_id}/decision",
+            headers=serve_headers(),
+            json={"approve": True},
+        )
+        await http.post(
+            "/v1/system/kill-switch", headers=serve_headers(), json={"engaged": True}
+        )
+        replay = await create_request(http, token, key="key-replay-kill-001")
+    assert replay.json()["allowed"] is False
+    assert replay.json()["state"] == "denied"
+
+
+async def test_replayed_create_cannot_reuse_a_consumed_approval(app, token):
+    """§7.6 via the create endpoint, not just the poll endpoint."""
+    async with client(app) as http:
+        created = await create_request(http, token, key="key-replay-consume-001")
+        approval_id = created.json()["approval_id"]
+        await http.post(
+            f"/v1/approvals/{approval_id}/decision",
+            headers=serve_headers(),
+            json={"approve": True},
+        )
+        first = await http.get(
+            f"/v1/approvals/{approval_id}/decision", headers=agent_headers(token)
+        )
+        assert first.json()["allowed"] is True
+        replay = await create_request(http, token, key="key-replay-consume-001")
+    assert replay.json()["allowed"] is False
+
+
+async def test_create_grants_at_most_once_without_any_poll(app, token):
+    """The create endpoint alone must not be a permission dispenser: an
+    auto-approved request is claimable exactly once, even if the agent
+    never calls the poll route."""
+    from mission_control.models import ApprovalPolicy
+    from mission_control.models.enums import PolicyAction
+
+    async with app.state.db_sessions() as session:
+        session.add(
+            ApprovalPolicy(
+                tool_name_pattern="read_file", arg_matchers={},
+                action=PolicyAction.AUTO_APPROVE, max_risk_level=RiskLevel.HIGH,
+                enabled=True, created_by="test",
+            )
+        )
+        await session.commit()
+
+    async with client(app) as http:
+        first = await create_request(
+            http, token, key="key-autoclaim-001", tool="read_file",
+            args={"path": "/workspace/a.txt"},
+        )
+        second = await create_request(
+            http, token, key="key-autoclaim-001", tool="read_file",
+            args={"path": "/workspace/a.txt"},
+        )
+    assert first.json()["state"] == "approved"
+    assert first.json()["allowed"] is True
+    assert second.json()["allowed"] is False

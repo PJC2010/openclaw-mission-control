@@ -14,7 +14,7 @@ from mission_control.app import create_app
 from mission_control.models.enums import EventKind, RunStatus, RunTrigger
 from mission_control.normalizer import AgentStatus, NormalizedEvent, RunUpsert
 
-from .conftest import make_settings, ok_resolver, serve_headers
+from .conftest import make_settings, ok_resolver, root_peer, serve_headers
 
 pytestmark = pytest.mark.anyio
 
@@ -24,7 +24,7 @@ NOW = datetime.datetime(2026, 8, 19, 12, 0, tzinfo=datetime.timezone.utc)
 @pytest.fixture
 async def app(test_db_url):
     application = create_app(
-        settings=make_settings(database_url=test_db_url), whois_resolver=ok_resolver
+        settings=make_settings(database_url=test_db_url), whois_resolver=ok_resolver, peer_resolver=root_peer
     )
     # Clean slate per test (the app owns its engine; reuse it).
     from sqlalchemy import text

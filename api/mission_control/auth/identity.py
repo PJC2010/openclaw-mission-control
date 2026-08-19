@@ -34,6 +34,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..config import Settings
+from .peer import PeerResolver, resolve_peer_uid
 from .tailscale import WhoisResolver
 
 security_log = logging.getLogger("mission_control.security")
@@ -123,11 +124,13 @@ class OperatorIdentityMiddleware:
         settings: Settings,
         whois_resolver: WhoisResolver,
         exempt_paths: frozenset[str] = DEFAULT_EXEMPT_PATHS,
+        peer_resolver: PeerResolver | None = None,
     ) -> None:
         self.app = app
         self.settings = settings
         self.whois_resolver = whois_resolver
         self.exempt_paths = exempt_paths
+        self.peer_resolver = peer_resolver or resolve_peer_uid
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -174,6 +177,39 @@ class OperatorIdentityMiddleware:
         if not peer_is_loopback:
             raise IdentityRejected(
                 403, "direct access is not permitted", "non_loopback_peer", peer=peer_ip
+            )
+
+        # Loopback alone proves nothing on a host that also runs the agents:
+        # a compromised runtime can open this socket and set every header
+        # Serve would have set. Ask the kernel who owns the other end —
+        # `tailscale serve` proxies as root, agents do not (§11.4, C4).
+        peer_port = (client[1] if client and len(client) > 1 else 0) or 0
+        server = scope.get("server") or ("127.0.0.1", 0)
+        server_host = str(server[0] or "127.0.0.1")
+        server_port = int(server[1] or 0)
+        credentials = None
+        try:
+            credentials = self.peer_resolver(peer_ip, int(peer_port), server_host, server_port)
+        except Exception as exc:  # noqa: BLE001 — unverifiable means unsafe
+            security_log.error("peer uid lookup failed: %r", exc)
+        if credentials is None:
+            if self.settings.require_peer_uid:
+                raise IdentityRejected(
+                    403,
+                    "cannot verify the local origin of this connection",
+                    "peer_uid_unresolved",
+                    peer=f"{peer_ip}:{peer_port}",
+                )
+        elif credentials.uid not in self.settings.operator_uid_set:
+            # This is the agent-self-approval case. Log it as loudly as the
+            # header-spoofing case, because it is the same attack one layer
+            # down.
+            raise IdentityRejected(
+                403,
+                "this connection did not come through tailscale serve",
+                "peer_uid_not_permitted",
+                peer_uid=credentials.uid,
+                permitted=sorted(self.settings.operator_uid_set),
             )
 
         headers = Headers(scope=scope)

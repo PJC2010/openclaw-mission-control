@@ -12,6 +12,7 @@ match on a non-critical action.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime
 import hashlib
 import json
@@ -194,6 +195,50 @@ class ApprovalService:
                 select(Approval).where(Approval.idempotency_key == idempotency_key)
             )
             if existing is not None:
+                if existing.args_digest == args_digest:
+                    # A replay must pass through the SAME gates as a poll.
+                    # Returning the stored row verbatim made this a second,
+                    # unguarded way to be told yes: an agent could re-POST
+                    # its key to wait out the kill switch, or to re-use an
+                    # approval it had already consumed (§7.6).
+                    if await self._kill_switch_on(session):
+                        return (
+                            dataclasses.replace(
+                                self._snapshot(existing),
+                                state=ApprovalState.DENIED,
+                                decided_via=DecidedVia.KILL_SWITCH,
+                                decision_note="denied: all agents paused (kill switch engaged)",
+                            ),
+                            False,
+                        )
+                    if existing.consumed_at is not None:
+                        security_log.warning(
+                            "approval %s re-requested after being consumed (key=%s) — "
+                            "one approval authorises one execution (§7.6)",
+                            existing.id, idempotency_key,
+                        )
+                        return (
+                            dataclasses.replace(
+                                self._snapshot(existing),
+                                state=ApprovalState.DENIED,
+                                decision_note="this approval was already used; request a new one",
+                            ),
+                            False,
+                        )
+                    if (
+                        existing.state is ApprovalState.PENDING
+                        and existing.expires_at <= now
+                    ):
+                        # The sweeper may not have run yet; never hand back a
+                        # pending row whose deadline has passed.
+                        return (
+                            dataclasses.replace(
+                                self._snapshot(existing),
+                                state=ApprovalState.EXPIRED,
+                                decided_via=DecidedVia.TIMEOUT,
+                            ),
+                            False,
+                        )
                 if existing.args_digest != args_digest:
                     security_log.error(
                         "idempotency_key reuse with mutated args: key=%s approval=%s "

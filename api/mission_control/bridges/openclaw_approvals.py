@@ -40,6 +40,7 @@ from typing import Any
 from ..approvals.service import ApprovalService, ApprovalSnapshot
 from ..config import Settings
 from ..models.enums import ApprovalState
+from ..adapters.openclaw.client import GatewayError
 from ..normalizer import Normalizer
 
 log = logging.getLogger("mission_control.bridges.openclaw")
@@ -51,6 +52,10 @@ DECISION_DENY = "deny"
 # Leave room to answer before the runtime's own deadline lapses: if the
 # gateway expires the request first, our verdict lands on a dead record.
 DEADLINE_MARGIN_S = 20.0
+
+# Gateway error codes meaning "this record definitively does not exist",
+# as opposed to "I could not reach or read it".
+NOT_FOUND_CODES = frozenset({"NOT_FOUND", "UNKNOWN_APPROVAL", "NO_SUCH_APPROVAL"})
 
 
 class OpenClawApprovalBridge:
@@ -167,7 +172,11 @@ class OpenClawApprovalBridge:
             return False
 
         # Never guess the kind — resolving with the wrong one force-denies.
-        record = await self._get_record(str(approval_id))
+        try:
+            record = await self._get_record(str(approval_id))
+        except Exception as exc:  # noqa: BLE001 — mirror on the event alone
+            log.warning("approval.get(%s) unavailable while mirroring: %r", approval_id, exc)
+            record = None
         presentation = (record or {}).get("presentation") or {}
         request = event_payload.get("request")
         if not isinstance(request, dict):
@@ -258,13 +267,19 @@ class OpenClawApprovalBridge:
             )
             return False
 
-        record = await self._get_record(snapshot.external_ref)
+        try:
+            record = await self._get_record(snapshot.external_ref)
+        except Exception as exc:  # noqa: BLE001 — unreadable, so still owed
+            await self._approvals.mark_resolution(
+                snapshot.id, confirmed=False, error=f"approval.get failed: {exc!r}"
+            )
+            return False
         if record is None:
-            # `*.approval.get` resolves pending records only, so a missing
-            # record most often means the gateway already reached a
-            # terminal state for it — nothing left to deliver.
+            # Only a positive not-found reaches here: `*.approval.get`
+            # resolves pending records only, so the gateway has already
+            # reached a terminal state and there is nothing left to deliver.
             log.info(
-                "openclaw approval %s no longer pending; treating as delivered",
+                "openclaw approval %s reported absent; already terminal",
                 snapshot.external_ref,
             )
             await self._approvals.mark_resolution(snapshot.id, confirmed=True)
@@ -335,13 +350,17 @@ class OpenClawApprovalBridge:
         return await self.bootstrap_pending()
 
     async def _get_record(self, approval_id: str) -> dict[str, Any] | None:
+        """The record, or None only when the gateway positively says it is
+        gone. Raises on anything else — "I could not read it" must never be
+        mistaken for "it is already resolved"."""
         if self._client is None:
-            return None
+            raise ConnectionError("not connected to the gateway")
         try:
             record = await self._client.call("approval.get", {"id": approval_id})
-        except Exception as exc:  # noqa: BLE001
-            log.warning("approval.get(%s) failed: %r", approval_id, exc)
-            return None
+        except GatewayError as exc:
+            if exc.code in NOT_FOUND_CODES:
+                return None  # definitively absent: already terminal
+            raise
         if isinstance(record, dict):
             return record.get("approval") if isinstance(record.get("approval"), dict) else record
         return None

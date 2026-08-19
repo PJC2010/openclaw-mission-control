@@ -40,6 +40,7 @@ def configure_logging(level: str) -> None:
 def create_app(
     settings: Settings | None = None,
     whois_resolver: WhoisResolver | None = None,
+    peer_resolver=None,
 ) -> FastAPI:
     """Build the app.
 
@@ -122,5 +123,6 @@ def create_app(
         OperatorIdentityMiddleware,
         settings=settings,
         whois_resolver=whois_resolver,
+        peer_resolver=peer_resolver,
     )
     return app
